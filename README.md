@@ -184,7 +184,7 @@ These build scripts use PyInstaller to produce a single-file app build.
 
 ## Project Status
 
-This project is already fun and feature-rich, but it is still best described as an experimental desktop pet rather than a polished end-user product. The codebase contains a lot of personality and behavior logic, and the public documentation is now aligned to that reality.
+This project is vibe-coded, experimental, and intentionally a little chaotic. It is already fun and feature-rich, but it is not yet a fully polished end-user product. Expect personality, surprising behavior, and rough edges alongside the charm.
 
 ## License
 
