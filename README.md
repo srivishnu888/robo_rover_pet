@@ -185,25 +185,6 @@ These build scripts use PyInstaller to produce a single-file app build.
 
 This project is already fun and feature-rich, but it is still best described as an experimental desktop pet rather than a polished end-user product. The codebase contains a lot of personality and behavior logic, and the public documentation is now aligned to that reality.
 
-## Can This Be Published Through npm?
-
-Yes, but not as a pure JavaScript app.
-
-This project is fundamentally a Python + Qt desktop app. An npm package could act as a wrapper that:
-
-- checks for Python
-- installs Python dependencies
-- verifies Ollama is installed
-- launches the pet
-
-That is possible, but it would still be a Python application under the hood. For a one-command install today, `pipx install . && robo-rover-pet` is the cleaner path.
-
-If you want true one-command consumer distribution later, the better options are:
-
-- a packaged Windows executable
-- a macOS app bundle
-- a Linux AppImage or similar package
-
 ## License
 
 MIT. See [LICENSE](LICENSE).
