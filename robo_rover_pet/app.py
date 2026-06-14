@@ -3968,13 +3968,21 @@ class PetWindow(QWidget):
         if not getattr(self.debris_overlay, "eva_visible", False):
             return
 
-        def run_sound() -> None:
-            try:
-                self._play_named_sound("walle_eve_01.wav", cooldown_seconds=2.0, avoid_recent=False, skip_if_blocked=True)
-            except Exception:
-                return
+        try:
+            played = self._play_named_sound(
+                "walle_eve_01.wav",
+                cooldown_seconds=2.0,
+                avoid_recent=False,
+                skip_if_blocked=True,
+            )
+        except Exception:
+            played = False
 
-        threading.Thread(target=run_sound, daemon=True).start()
+        if not played:
+            if token == int(getattr(self, "_eva_sound_token", 0)) and getattr(self.debris_overlay, "eva_visible", False):
+                QTimer.singleShot(650, lambda active_token=token: self._play_eva_flyby_sound(active_token))
+            return
+
         if token == int(getattr(self, "_eva_sound_token", 0)) and getattr(self.debris_overlay, "eva_visible", False):
             QTimer.singleShot(random.randint(2000, 3000), lambda active_token=token: self._play_eva_flyby_sound(active_token))
 
