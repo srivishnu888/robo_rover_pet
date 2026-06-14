@@ -1,16 +1,17 @@
 # Robo Rover Pet
 
-`Robo Rover Pet` is a local desktop companion built with Python and PySide6. It lives near your taskbar, reacts to your desktop activity, chats with you, sets reminders, wanders around, watches TV, kicks a ball, chases butterflies, cleans little debris piles, and uses a local Ollama model to generate short in-character reactions.
+`Robo Rover Pet` is a virtual desktop pet built to distract you from stress, keep your desktop feeling alive, and add playful interaction to long work sessions. It lives near your taskbar, acts autonomously, comments on what you type by using a local LLM, reacts to how much work you are doing, nudges you to take breaks, helps with quick reminders, and turns your desktop into something more fun and less tense.
 
 The pet's public project name is `Robo Rover Pet`. Inside the app, the character currently refers to itself as `Wally`, which is the rover's in-app persona.
 
 ## What It Does
 
-- Runs as a floating desktop pet with tray icon support.
+- Runs as a floating autonomous desktop pet with tray icon support.
+- Uses a local Ollama model to make short in-character comments about your typing and desktop activity for fun interaction.
+- Reacts to mouse movement, typing, scrolling, workload pressure, and optional screenshot summaries.
+- Tries to relieve stress by interrupting work with playful reactions and break nudges.
+- Supports quick reminder parsing and local reminder alerts.
 - Opens a mini chat and a larger chat window for commands and conversation.
-- Uses local Ollama for short personality-driven reactions and screen-aware comments.
-- Supports reminder parsing and local reminder alerts.
-- Reacts to mouse movement, typing, scrolling, and optional screenshot summaries.
 - Performs playful actions like watching TV, kicking a basketball, chasing butterflies, singing, dancing, and cleaning debris.
 - Stores settings locally in `~/.robo_rover_pet/settings_v8_33.json`.
 
