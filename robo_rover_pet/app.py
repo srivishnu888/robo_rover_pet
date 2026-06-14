@@ -2353,8 +2353,10 @@ class ActivityMonitor:
         self.motion_score = 0.0
         self.last_input_time = time.time()
         self.key_count = 0
+        self.click_count = 0
         self.scroll_count = 0
         self.recent_key_score = 0.0
+        self.recent_click_score = 0.0
         self.recent_scroll_score = 0.0
         self.listener_error = ""
         self.typed_buffer = ""
@@ -2386,23 +2388,28 @@ class ActivityMonitor:
     def consume_counts(self) -> Dict[str, object]:
         with self._lock:
             keys = self.key_count
+            clicks = self.click_count
             scrolls = self.scroll_count
             words = self.word_count
             typed_excerpt = self.typed_buffer[-120:]
             if typed_excerpt.strip():
                 self.last_typed_excerpt = typed_excerpt
             self.key_count = 0
+            self.click_count = 0
             self.scroll_count = 0
             self.word_count = 0
             # Keep a little rolling typed context, but do not accumulate indefinitely.
             self.typed_buffer = self.typed_buffer[-160:]
         self.recent_key_score = self.recent_key_score * 0.82 + keys
+        self.recent_click_score = self.recent_click_score * 0.82 + clicks
         self.recent_scroll_score = self.recent_scroll_score * 0.82 + scrolls
         return {
             "key_count": keys,
+            "click_count": clicks,
             "word_count": words,
             "scroll_count": scrolls,
             "recent_key_score": round(self.recent_key_score, 1),
+            "recent_click_score": round(self.recent_click_score, 1),
             "recent_scroll_score": round(self.recent_scroll_score, 1),
             "mouse_motion_score": round(self.motion_score, 2),
             "idle_seconds": round(max(0.0, time.time() - self.last_input_time), 1),
@@ -2450,8 +2457,15 @@ class ActivityMonitor:
                     self.scroll_count += max(1, int(abs(dy)))
                     self.last_input_time = time.time()
 
+            def on_click(_x, _y, _button, pressed) -> None:
+                if not pressed:
+                    return
+                with self._lock:
+                    self.click_count += 1
+                    self.last_input_time = time.time()
+
             self._keyboard_listener = keyboard.Listener(on_press=on_press)
-            self._mouse_listener = mouse.Listener(on_scroll=on_scroll)
+            self._mouse_listener = mouse.Listener(on_scroll=on_scroll, on_click=on_click)
             self._keyboard_listener.daemon = True
             self._mouse_listener.daemon = True
             self._keyboard_listener.start()
@@ -2461,6 +2475,8 @@ class ActivityMonitor:
 
 
 class PetWindow(QWidget):
+    play_soft_voice_requested = Signal(str, float)
+
     def __init__(self) -> None:
         super().__init__()
         self.store = SettingsStore()
@@ -2486,6 +2502,7 @@ class PetWindow(QWidget):
         self.debris_overlay = DebrisOverlay(self.store)
         self.activity_monitor = ActivityMonitor()
         self.activity_monitor.set_enabled(self.cfg.screen_awareness_enabled)
+        self.play_soft_voice_requested.connect(self._play_soft_voice_variant_sound_now)
 
         self.setWindowTitle("Wally Rover Pet")
         self.visual_scale = self._scale_from_config()
@@ -3236,6 +3253,14 @@ class PetWindow(QWidget):
             self._remember_event("tiny_tool_used", text="summon_eva", data={"did": "tool_summon_eva_flyby"})
             self._eva_flyby_event(force=True)
             return True
+        if t in {"mute", "silent", "be silent", "go silent", "mute sounds", "sounds off", "sound off", "voice off", "stop sounds", "stop sound"}:
+            self._remember_event("tiny_tool_used", text="sounds_off", data={"did": "tool_sounds_off"})
+            self._set_tts_enabled(False)
+            return True
+        if t in {"unmute", "unsilent", "sound on", "sounds on", "voice on", "enable sounds", "enable sound", "turn sounds on", "turn sound on"}:
+            self._remember_event("tiny_tool_used", text="sounds_on", data={"did": "tool_sounds_on"})
+            self._set_tts_enabled(True)
+            return True
         if any(p in t for p in ["send wind", "summon wind", "send leaves", "send debris", "send trash"]):
             return self._execute_wind_summon_command(raw)
         if re.search(r"\b(clean|clean up|clean this|sweep)\b", t):
@@ -3602,35 +3627,118 @@ class PetWindow(QWidget):
         high = 1.0 + max(0.0, variation)
         return max(0.0, min(1.0, base_volume * random.uniform(low, high)))
 
-    def _can_play_sound(self, name: str, cooldown_seconds: float = 30.0, avoid_recent: bool = True) -> bool:
+    def _sound_duration_seconds(self, name: str) -> float:
+        cache = dict(getattr(self, "_sound_duration_cache", {}))
+        if name in cache:
+            return float(cache[name])
+        path = self._sound_asset_path(name)
+        duration = 1.8
+        try:
+            if path.suffix.lower() == ".wav":
+                with wave.open(str(path), "rb") as reader:
+                    rate = max(1, int(reader.getframerate()))
+                    frames = int(reader.getnframes())
+                    duration = max(0.2, frames / float(rate))
+            else:
+                duration = {
+                    "wall-e2.MP3": 1.9,
+                    "whoa.MP3": 1.1,
+                    "too much garbage.MP3": 2.6,
+                }.get(path.name, 1.8)
+        except Exception:
+            duration = 1.8
+        cache[name] = duration
+        self._sound_duration_cache = cache
+        return duration
+
+    def _resolve_cooldown_seconds(self, cooldown_seconds: float | Tuple[float, float]) -> float:
+        if isinstance(cooldown_seconds, tuple):
+            low, high = cooldown_seconds
+            low = max(0.0, float(low))
+            high = max(low, float(high))
+            return random.uniform(low, high)
+        return max(0.0, float(cooldown_seconds))
+
+    def _sound_pool_available(self, pool_key: str) -> bool:
+        return time.time() >= float(dict(getattr(self, "_sound_pool_next_allowed_at", {})).get(pool_key, 0.0))
+
+    def _mark_sound_pool_played(self, pool_key: str, cooldown_seconds: float | Tuple[float, float]) -> None:
+        ready_state = dict(getattr(self, "_sound_pool_next_allowed_at", {}))
+        ready_state[pool_key] = time.time() + self._resolve_cooldown_seconds(cooldown_seconds)
+        self._sound_pool_next_allowed_at = ready_state
+
+    def _sound_manager_available(self) -> bool:
+        return time.time() >= float(getattr(self, "_sound_busy_until", 0.0))
+
+    def _claim_sound_play(
+        self,
+        name: str,
+        cooldown_seconds: float | Tuple[float, float] = (15.0, 45.0),
+        avoid_recent: bool = True,
+    ) -> bool:
+        path = self._sound_asset_path(name)
+        if not path.exists():
+            raise FileNotFoundError(str(path))
+        if not self._can_play_sound(name, cooldown_seconds=cooldown_seconds, avoid_recent=avoid_recent):
+            return False
+        if not self._sound_manager_available():
+            return False
+        self._mark_sound_played(name, cooldown_seconds=cooldown_seconds)
+        self._sound_busy_name = name
+        self._sound_busy_until = time.time() + self._sound_duration_seconds(name) + 0.08
+        return True
+
+    def _can_play_sound(self, name: str, cooldown_seconds: float | Tuple[float, float] = (15.0, 45.0), avoid_recent: bool = True) -> bool:
         now = time.time()
         recent_name = str(getattr(self, "_last_sound_played_name", ""))
-        last_played = dict(getattr(self, "_sound_last_played_at", {}))
+        next_allowed = dict(getattr(self, "_sound_next_allowed_at", {}))
         if avoid_recent and name == recent_name:
             return False
-        if now - float(last_played.get(name, 0.0)) < cooldown_seconds:
+        if now < float(next_allowed.get(name, 0.0)):
             return False
         return True
 
-    def _mark_sound_played(self, name: str) -> None:
+    def _mark_sound_played(self, name: str, cooldown_seconds: float | Tuple[float, float] = (15.0, 45.0)) -> None:
+        now = time.time()
         sound_state = dict(getattr(self, "_sound_last_played_at", {}))
-        sound_state[name] = time.time()
+        sound_state[name] = now
         self._sound_last_played_at = sound_state
+        ready_state = dict(getattr(self, "_sound_next_allowed_at", {}))
+        ready_state[name] = now + self._resolve_cooldown_seconds(cooldown_seconds)
+        self._sound_next_allowed_at = ready_state
         self._last_sound_played_name = name
 
-    def _choose_sound_from_candidates(self, candidates: List[str], cooldown_seconds: float = 30.0, avoid_recent: bool = True) -> Optional[str]:
+    def _choose_sound_from_candidates(
+        self,
+        candidates: List[str],
+        cooldown_seconds: float | Tuple[float, float] = (15.0, 45.0),
+        avoid_recent: bool = True,
+        pool_key: Optional[str] = None,
+    ) -> Optional[str]:
         if not candidates:
+            return None
+        if pool_key and not self._sound_pool_available(pool_key):
             return None
         now = time.time()
         recent_name = str(getattr(self, "_last_sound_played_name", ""))
         last_played = dict(getattr(self, "_sound_last_played_at", {}))
+        next_allowed = dict(getattr(self, "_sound_next_allowed_at", {}))
         eligible = [
             name
             for name in candidates
-            if (not avoid_recent or name != recent_name) and now - float(last_played.get(name, 0.0)) >= cooldown_seconds
+            if (not avoid_recent or name != recent_name) and now >= float(next_allowed.get(name, 0.0))
         ]
         if not eligible:
             return None
+        if pool_key:
+            positions = dict(getattr(self, "_sound_pool_positions", {}))
+            start = int(positions.get(pool_key, -1)) + 1
+            ordered = [candidates[(start + offset) % len(candidates)] for offset in range(len(candidates))]
+            for name in ordered:
+                if name in eligible:
+                    positions[pool_key] = candidates.index(name)
+                    self._sound_pool_positions = positions
+                    return name
         eligible.sort(key=lambda name: float(last_played.get(name, 0.0)))
         oldest_at = float(last_played.get(eligible[0], 0.0))
         oldest = [name for name in eligible if float(last_played.get(name, 0.0)) == oldest_at]
@@ -3639,7 +3747,13 @@ class PetWindow(QWidget):
     def _choose_sound_for_profile(self, profile: str) -> Optional[str]:
         sound_sets = self._sound_profile_candidates()
         candidates = list(sound_sets.get(profile, sound_sets["happy"]))
-        return self._choose_sound_from_candidates(candidates, cooldown_seconds=30.0, avoid_recent=True)
+        shared_pool_key = {
+            "angry": "stun_family",
+            "alert": "stun_family",
+            "dizzy": "stun_family",
+            "reminder": "stun_family",
+        }.get(profile, profile)
+        return self._choose_sound_from_candidates(candidates, cooldown_seconds=(15.0, 45.0), avoid_recent=True, pool_key=shared_pool_key)
 
     def _play_randomized_wav(self, path: Path) -> None:
         import winsound
@@ -3685,15 +3799,12 @@ class PetWindow(QWidget):
             except Exception:
                 pass
 
-    def _play_named_sound(self, name: str, cooldown_seconds: float = 30.0, avoid_recent: bool = True, skip_if_blocked: bool = False) -> bool:
+    def _play_named_sound(self, name: str, cooldown_seconds: float | Tuple[float, float] = (15.0, 45.0), avoid_recent: bool = True, skip_if_blocked: bool = False) -> bool:
         path = self._sound_asset_path(name)
         if not path.exists():
             raise FileNotFoundError(str(path))
-        if not self._can_play_sound(name, cooldown_seconds=cooldown_seconds, avoid_recent=avoid_recent):
-            if skip_if_blocked:
-                return False
-            raise RuntimeError(f"sound blocked by cooldown: {name}")
-        self._mark_sound_played(name)
+        if not self._claim_sound_play(name, cooldown_seconds=cooldown_seconds, avoid_recent=avoid_recent):
+            return False
         self._play_randomized_wav(path)
         return True
 
@@ -3711,13 +3822,10 @@ class PetWindow(QWidget):
         player.deleteLater()
         audio.deleteLater()
 
-    def _play_quiet_media_sound(self, name: str, volume: float = 0.10, cooldown_seconds: float = 30.0, variation: float = 0.10) -> None:
+    def _play_quiet_media_sound_reserved(self, name: str, volume: float = 0.10, variation: float = 0.10) -> None:
         path = self._sound_asset_path(name)
         if not path.exists():
             raise FileNotFoundError(str(path))
-        if not self._can_play_sound(name, cooldown_seconds=cooldown_seconds, avoid_recent=True):
-            return
-        self._mark_sound_played(name)
 
         audio = QAudioOutput(self)
         audio.setVolume(self._randomized_volume(volume, variation))
@@ -3730,32 +3838,53 @@ class PetWindow(QWidget):
         player.play()
         QTimer.singleShot(7000, lambda p=player, a=audio: self._release_media_sound_ref(p, a))
 
-    def _play_soft_voice_variant_sound(self, name: str) -> None:
+    def _play_quiet_media_sound(self, name: str, volume: float = 0.10, cooldown_seconds: float | Tuple[float, float] = (15.0, 45.0), variation: float = 0.10) -> None:
+        path = self._sound_asset_path(name)
+        if not path.exists():
+            raise FileNotFoundError(str(path))
+        if not self._claim_sound_play(name, cooldown_seconds=cooldown_seconds, avoid_recent=True):
+            return
+        self._play_quiet_media_sound_reserved(name, volume=volume, variation=variation)
+
+    def _choose_wall_e_voice_variant(self) -> Optional[str]:
+        return self._choose_sound_from_candidates(
+            ["walle_vocal_basic_01.wav", "wall-e2.MP3"],
+            cooldown_seconds=(6.0, 14.0),
+            avoid_recent=True,
+            pool_key="soft_voice",
+        )
+
+    def _play_soft_voice_variant_sound_now(self, name: str, volume: float) -> None:
         try:
-            self._play_quiet_media_sound(name, volume=random.uniform(0.05, 0.08), cooldown_seconds=30.0, variation=0.0)
+            self._play_quiet_media_sound_reserved(name, volume=volume, variation=0.0)
         except Exception:
             return
 
+    def _play_soft_voice_variant_sound(self, name: str) -> None:
+        cooldown = (6.0, 14.0)
+        if not self._sound_pool_available("soft_voice"):
+            return
+        if not self._claim_sound_play(name, cooldown_seconds=cooldown, avoid_recent=True):
+            return
+        self._mark_sound_pool_played("soft_voice", cooldown)
+        self.play_soft_voice_requested.emit(name, random.uniform(0.05, 0.08))
+
     def _play_tantrum_garbage_sound(self) -> None:
         try:
-            self._play_quiet_media_sound("too much garbage.MP3", volume=0.10, cooldown_seconds=30.0)
+            self._play_quiet_media_sound("too much garbage.MP3", volume=0.10, cooldown_seconds=(15.0, 45.0))
         except Exception:
             return
 
     def _play_whoa_sound(self) -> None:
         try:
-            self._play_quiet_media_sound("whoa.MP3", volume=0.10, cooldown_seconds=30.0)
+            self._play_quiet_media_sound("whoa.MP3", volume=0.10, cooldown_seconds=(15.0, 45.0))
         except Exception:
             return
 
     def _play_robot_voice(self, text: str) -> None:
         profile = self._robot_voice_profile(text)
-        voice_candidates = {
-            "happy": ["walle_vocal_basic_01.wav", "wall-e2.MP3"],
-            "play": ["walle_vocal_basic_01.wav", "wall-e2.MP3"],
-        }
-        if profile in voice_candidates:
-            choice = self._choose_sound_from_candidates(voice_candidates[profile], cooldown_seconds=30.0, avoid_recent=True)
+        if profile in {"happy", "play"}:
+            choice = self._choose_wall_e_voice_variant()
             if choice is not None:
                 self._play_soft_voice_variant_sound(choice)
                 return
@@ -3790,6 +3919,11 @@ class PetWindow(QWidget):
     def _play_robot_emoji_sound(self, effect: str) -> None:
         profile = self._emoji_sound_profile(effect)
         if profile is None:
+            return
+        if profile in {"happy", "play"}:
+            choice = self._choose_wall_e_voice_variant()
+            if choice is not None:
+                self._play_soft_voice_variant_sound(choice)
             return
         choice = self._choose_sound_for_profile(profile)
         if choice is not None:
@@ -5043,16 +5177,25 @@ class PetWindow(QWidget):
         return "other"
 
     def _should_react_to_activity_event(self, event_kind: str, can_call: bool) -> bool:
-        """Guarantee at least one LLM reaction per five events per bucket when possible."""
+        """Gently lively: more present than silent, still not chatty."""
         bucket = self._activity_event_bucket(event_kind)
+        policy = {
+            "typing": (4, 0.30),
+            "window": (4, 0.38),
+            "mouse": (5, 0.22),
+            "scroll": (4, 0.26),
+            "idle": (6, 0.18),
+            "other": (5, 0.20),
+        }
+        window, base_probability = policy.get(bucket, (5, 0.20))
         count = int(self._event_reaction_counters.get(bucket, 0)) + 1
-        forced = count >= 5
-        chosen = forced or random.random() < 0.20
+        forced = count >= window
+        chosen = forced or random.random() < base_probability
         if chosen and can_call:
             self._event_reaction_counters[bucket] = 0
             return True
         # If it wanted to react but could not call, keep it near threshold.
-        self._event_reaction_counters[bucket] = min(count, 4 if chosen else count)
+        self._event_reaction_counters[bucket] = min(count, (window - 1) if chosen else count)
         return False
 
     def _update_workload_trash(self, keys: int, scrolls: int, words: int, typed_excerpt: str, current_window: str, now: float) -> Optional[Dict[str, object]]:
@@ -5160,6 +5303,7 @@ class PetWindow(QWidget):
             return
 
         keys = int(context_counts.get("key_count", 0))
+        clicks = int(context_counts.get("click_count", 0))
         words = int(context_counts.get("word_count", 0))
         scrolls = int(context_counts.get("scroll_count", 0))
         motion = float(context_counts.get("mouse_motion_score", 0.0))
@@ -5185,7 +5329,7 @@ class PetWindow(QWidget):
         use_vision = False
 
         # Window switch is a first-class event. It does not always speak, but it can feed Ollama.
-        if window_changed and now - self._last_activity_bubble_at > 4:
+        if window_changed and now - self._last_activity_bubble_at > 2.5:
             event_kind = "window_changed"
             self._last_window_event_at = now
             event_extra = {"old_window": previous_window[:90], "new_window": current_window[:90]}
@@ -5193,7 +5337,7 @@ class PetWindow(QWidget):
             self.eye_focus = "screen"
             self.eyebrow_pose = "curious"
             use_vision = True
-        elif keys >= 6 and typed_excerpt and now - self._last_activity_bubble_at > 5:
+        elif keys >= 4 and typed_excerpt and now - self._last_activity_bubble_at > 3.5:
             event_kind = "typing_activity"
             event_extra = {"typed_excerpt": typed_excerpt, "keys": keys, "words": words, "window": current_window[:90]}
             self.last_typing_reaction_excerpt = typed_excerpt
@@ -5206,18 +5350,24 @@ class PetWindow(QWidget):
             self._last_dizzy_event_at = now
             self.set_expression("dizzy")
             self._apply_body_controls({"antenna": "wiggle", "eyes": "mouse", "eyebrow": "dizzy", "emoji": "dizzy", "left_arm": "tired", "right_arm": "tired"})
-        elif cursor_above and motion > 25 and now - self._last_mouse_lift_event_at > 25:
+        elif cursor_above and motion > 20 and now - self._last_mouse_lift_event_at > 18:
             event_kind = "mouse_hover_lifted_above_pet"
             self._last_mouse_lift_event_at = now
             self.set_expression("surprised")
             self._apply_body_controls({"antenna": "perked", "eyes": "up", "eyebrow": "surprised", "emoji": "question", "left_arm": "point"})
-        elif scrolls >= 4 and now - self._last_activity_bubble_at > 10:
+        elif clicks >= 2 and cursor_near and now - self._last_activity_bubble_at > 8:
+            event_kind = "mouse_clicking"
+            event_extra = {"click_count": clicks, "window": current_window[:90]}
+            self.set_expression("watching")
+            self.eye_focus = "mouse"
+            self.eyebrow_pose = "curious"
+        elif scrolls >= 3 and now - self._last_activity_bubble_at > 7:
             event_kind = "scrolling"
             event_extra = {"scroll_count": scrolls, "window": current_window[:90]}
             self.set_expression("surprised")
             self.eye_focus = "screen"
             self.eyebrow_pose = "curious"
-        elif motion > 60 and now - self._last_activity_bubble_at > 14:
+        elif motion > 60 and now - self._last_activity_bubble_at > 10:
             event_kind = "fast_mouse"
             self.set_expression("excited")
             self.eye_focus = "mouse"
@@ -5256,7 +5406,7 @@ class PetWindow(QWidget):
         can_call = (
             self.cfg.ai_reactions_enabled
             and not self._thread_running(self.reaction_worker)
-            and now - self.last_ai_request_at > 6.0
+            and now - self.last_ai_request_at > 3.5
         )
         if self._should_react_to_activity_event(event_kind, can_call):
             self._event_reaction_used += 1

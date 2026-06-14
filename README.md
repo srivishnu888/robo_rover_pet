@@ -22,6 +22,8 @@ Inside the app, the rover's in-character persona is `Wally`.
 - Post-EVA recovery can spill into butterfly chasing and dramatic ball kicks.
 - Balanced cleaning behavior: Wally batch-collects debris, avoids bin-orbit loops, and returns to playful behavior after cleanup.
 - New settings for `EVA` flyby speed and flyby duration.
+- Integrated desktop-pet sound system with alternating `WALL-E`-style voice clips, chirps, stun variations, `EVA` flyby audio, and contextual special sounds.
+- Mini-chat now supports quick sound toggles like `mute`, `silent`, `sounds off`, `unmute`, and `sounds on`.
 
 ## Screenshots
 
@@ -110,6 +112,13 @@ These commands are explicitly supported in the current codebase:
 - `eva flyby`
 - `call eva`
 - `throw trash for attention`
+- `mute`
+- `silent`
+- `sounds off`
+- `voice off`
+- `unmute`
+- `sounds on`
+- `voice on`
 - `list reminders`
 - `show reminders`
 - `clear reminders`
