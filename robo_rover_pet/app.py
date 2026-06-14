@@ -2517,6 +2517,7 @@ class PetWindow(QWidget):
         self.bubble_source = "static"
         self._bubble_shown_at = 0.0
         self._bubble_protected_until = 0.0
+        self._pending_bubble_payload: Optional[Tuple[str, int, str]] = None
         self.bubble_timer: Optional[QTimer] = None
         self.drag_offset: Optional[QPoint] = None
         self.is_dragging = False
@@ -2658,6 +2659,12 @@ class PetWindow(QWidget):
         self._eva_miss_started = False
         self._eva_last_call_at = 0.0
         self._eva_flyby_seen = 0
+        self._audio_lane_name = ""
+        self._audio_lane_priority = 0
+        self._audio_lane_busy_until = 0.0
+        self._audio_lane_interruptible = False
+        self._audio_lane_pending = None
+        self._audio_lane_pending_priority = -1
 
         self.animation_timer = QTimer(self)
         self.animation_timer.setInterval(33)
@@ -2668,6 +2675,10 @@ class PetWindow(QWidget):
         self.behavior_timer.setInterval(1800)
         self.behavior_timer.timeout.connect(self._choose_next_behavior)
         self.behavior_timer.start()
+
+        self.audio_lane_timer = QTimer(self)
+        self.audio_lane_timer.setSingleShot(True)
+        self.audio_lane_timer.timeout.connect(self._release_audio_lane)
 
         self.activity_timer = QTimer(self)
         self.activity_timer.setInterval(700)
@@ -3812,12 +3823,137 @@ class PetWindow(QWidget):
             except Exception:
                 pass
 
+    def _sound_priority(self, name: str) -> int:
+        token = name.strip().lower()
+        if token == "walle_eve_01.wav":
+            return 5
+        if token in {"too much garbage.mp3", "whoa.mp3"}:
+            return 4
+        if "stun" in token or token in {"walle_sigh_01.wav", "walle_walle_01.wav"}:
+            return 3
+        if "eve" in token or "chirp" in token or token in {"walle_vocal_basic_01.wav", "wall-e2.mp3"}:
+            return 1
+        return 2
+
+    def _sound_is_tiny(self, name: str) -> bool:
+        token = name.strip().lower()
+        return bool("chirp" in token or "eve" in token or token in {"walle_vocal_basic_01.wav", "wall-e2.mp3"})
+
+    def _stop_active_media_sounds(self) -> None:
+        refs = list(getattr(self, "_media_sound_refs", []))
+        self._media_sound_refs = []
+        for player, audio in refs:
+            try:
+                player.stop()
+            except Exception:
+                pass
+            try:
+                player.deleteLater()
+            except Exception:
+                pass
+            try:
+                audio.deleteLater()
+            except Exception:
+                pass
+
+    def _stop_active_audio(self) -> None:
+        self._stop_active_media_sounds()
+        try:
+            import winsound
+
+            winsound.PlaySound(None, winsound.SND_PURGE)
+        except Exception:
+            pass
+
+    def _activate_audio_lane(self, name: str, duration_seconds: float, priority: int, interruptible: bool) -> None:
+        self._audio_lane_name = name
+        self._audio_lane_priority = priority
+        self._audio_lane_busy_until = time.time() + max(0.18, float(duration_seconds))
+        self._audio_lane_interruptible = interruptible
+        self.audio_lane_timer.stop()
+        self.audio_lane_timer.start(max(180, int(max(0.18, float(duration_seconds)) * 1000)))
+
+    def _release_audio_lane(self) -> None:
+        remaining = float(getattr(self, "_audio_lane_busy_until", 0.0)) - time.time()
+        if remaining > 0.05:
+            self.audio_lane_timer.stop()
+            self.audio_lane_timer.start(max(120, int(remaining * 1000)))
+            return
+        pending = getattr(self, "_audio_lane_pending", None)
+        self._audio_lane_name = ""
+        self._audio_lane_priority = 0
+        self._audio_lane_busy_until = 0.0
+        self._audio_lane_interruptible = False
+        self._audio_lane_pending = None
+        self._audio_lane_pending_priority = -1
+        if callable(pending):
+            QTimer.singleShot(0, pending)
+
+    def _reserve_audio_lane(
+        self,
+        name: str,
+        duration_seconds: float,
+        *,
+        priority: Optional[int] = None,
+        interruptible: bool = False,
+        queue_if_blocked: bool = False,
+        replay=None,
+    ) -> bool:
+        now = time.time()
+        current_name = str(getattr(self, "_audio_lane_name", "") or "")
+        current_priority = int(getattr(self, "_audio_lane_priority", 0))
+        current_until = float(getattr(self, "_audio_lane_busy_until", 0.0))
+        current_interruptible = bool(getattr(self, "_audio_lane_interruptible", False))
+        force_eva_priority = name.strip().lower() == "walle_eve_01.wav"
+        eva_visible = bool(getattr(self.debris_overlay, "eva_visible", False))
+        if eva_visible and not force_eva_priority:
+            return False
+        desired_priority = self._sound_priority(name) if priority is None else int(priority)
+        if current_name and now < current_until:
+            if force_eva_priority:
+                self._stop_active_audio()
+            elif desired_priority > current_priority and current_interruptible:
+                self._stop_active_audio()
+            else:
+                if queue_if_blocked and callable(replay):
+                    pending = getattr(self, "_audio_lane_pending", None)
+                    pending_priority = int(getattr(self, "_audio_lane_pending_priority", -1))
+                    if pending is None or desired_priority >= pending_priority:
+                        self._audio_lane_pending = replay
+                        self._audio_lane_pending_priority = desired_priority
+                return False
+        self._audio_lane_pending_priority = -1
+        self._activate_audio_lane(name, duration_seconds, desired_priority, interruptible)
+        return True
+
     def _play_named_sound(self, name: str, cooldown_seconds: float | Tuple[float, float] = (15.0, 45.0), avoid_recent: bool = True, skip_if_blocked: bool = False) -> bool:
         path = self._sound_asset_path(name)
         if not path.exists():
             raise FileNotFoundError(str(path))
-        if not self._claim_sound_play(name, cooldown_seconds=cooldown_seconds, avoid_recent=avoid_recent):
+        is_eva_priority = name.strip().lower() == "walle_eve_01.wav"
+        if is_eva_priority:
+            self._stop_active_audio()
+        if not self._can_play_sound(name, cooldown_seconds=cooldown_seconds, avoid_recent=avoid_recent):
             return False
+        duration_seconds = self._sound_duration_seconds(name) + 0.08
+        if not self._reserve_audio_lane(
+            name,
+            duration_seconds,
+            priority=self._sound_priority(name),
+            interruptible=self._sound_is_tiny(name) and not is_eva_priority,
+            queue_if_blocked=self._sound_is_tiny(name) and not skip_if_blocked,
+            replay=lambda n=name, c=cooldown_seconds, a=avoid_recent, s=skip_if_blocked: self._play_named_sound(n, cooldown_seconds=c, avoid_recent=a, skip_if_blocked=s),
+        ):
+            return False
+        if not self._sound_manager_available():
+            return False
+        self._mark_sound_played(name, cooldown_seconds=cooldown_seconds)
+        self._sound_busy_name = name
+        self._sound_busy_until = time.time() + duration_seconds
+        if self._sound_is_tiny(name):
+            base_volume = 0.60 if is_eva_priority else 0.06
+            self._play_quiet_media_sound_reserved(name, volume=base_volume, variation=0.10)
+            return True
         self._play_randomized_wav(path)
         return True
 
@@ -3855,8 +3991,23 @@ class PetWindow(QWidget):
         path = self._sound_asset_path(name)
         if not path.exists():
             raise FileNotFoundError(str(path))
-        if not self._claim_sound_play(name, cooldown_seconds=cooldown_seconds, avoid_recent=True):
+        if not self._can_play_sound(name, cooldown_seconds=cooldown_seconds, avoid_recent=True):
             return
+        duration_seconds = self._sound_duration_seconds(name) + 0.08
+        if not self._reserve_audio_lane(
+            name,
+            duration_seconds,
+            priority=self._sound_priority(name),
+            interruptible=True,
+            queue_if_blocked=self._sound_is_tiny(name),
+            replay=lambda n=name, v=volume, c=cooldown_seconds, r=variation: self._play_quiet_media_sound(n, volume=v, cooldown_seconds=c, variation=r),
+        ):
+            return
+        if not self._sound_manager_available():
+            return
+        self._mark_sound_played(name, cooldown_seconds=cooldown_seconds)
+        self._sound_busy_name = name
+        self._sound_busy_until = time.time() + duration_seconds
         self._play_quiet_media_sound_reserved(name, volume=volume, variation=variation)
 
     def _choose_wall_e_voice_variant(self) -> Optional[str]:
@@ -3877,10 +4028,25 @@ class PetWindow(QWidget):
         cooldown = (6.0, 14.0)
         if not self._sound_pool_available("soft_voice"):
             return
-        if not self._claim_sound_play(name, cooldown_seconds=cooldown, avoid_recent=True):
+        if not self._can_play_sound(name, cooldown_seconds=cooldown, avoid_recent=True):
             return
+        duration_seconds = self._sound_duration_seconds(name) + 0.08
+        if not self._reserve_audio_lane(
+            name,
+            duration_seconds,
+            priority=1,
+            interruptible=True,
+            queue_if_blocked=True,
+            replay=lambda n=name: self._play_soft_voice_variant_sound(n),
+        ):
+            return
+        if not self._sound_manager_available():
+            return
+        self._mark_sound_played(name, cooldown_seconds=cooldown)
+        self._sound_busy_name = name
+        self._sound_busy_until = time.time() + duration_seconds
         self._mark_sound_pool_played("soft_voice", cooldown)
-        self.play_soft_voice_requested.emit(name, random.uniform(0.05, 0.08))
+        self.play_soft_voice_requested.emit(name, random.uniform(0.025, 0.04))
 
     def _play_tantrum_garbage_sound(self) -> None:
         try:
@@ -4101,16 +4267,19 @@ class PetWindow(QWidget):
         current_source = str(getattr(self, "bubble_source", "static") or "static")
         current_priority = priority_map.get(current_source, 0)
         new_priority = priority_map.get(source, 0)
-        if (
-            self.bubble_text
-            and now < float(getattr(self, "_bubble_protected_until", 0.0))
-            and new_priority < current_priority
-        ):
+        bubble_active = bool(self.bubble_text and now < float(getattr(self, "_bubble_protected_until", 0.0)))
+        allow_tool_to_reply_upgrade = current_source == "tool" and source in {"ollama", "error"}
+        allow_static_upgrade = current_source == "static" and new_priority > current_priority
+        allow_error_override = source == "error" and current_source != "error"
+        if bubble_active and not (allow_tool_to_reply_upgrade or allow_static_upgrade or allow_error_override):
+            if source != "static":
+                self._pending_bubble_payload = (text, duration_ms, source)
             return
         self.bubble_text = text
         self.bubble_source = source
         self._bubble_shown_at = now
         self._bubble_protected_until = now + hold_map.get(source, 0.0)
+        self._pending_bubble_payload = None
         self.bubble.show_message(text, self.frameGeometry(), duration_ms, source=source)
         if self.bubble_timer:
             self.bubble_timer.stop()
@@ -4121,11 +4290,16 @@ class PetWindow(QWidget):
         self.update()
 
     def _hide_bubble(self) -> None:
+        pending = getattr(self, "_pending_bubble_payload", None)
         self.bubble_text = ""
         self.bubble_source = "static"
         self._bubble_shown_at = 0.0
         self._bubble_protected_until = 0.0
+        self._pending_bubble_payload = None
         self.update()
+        if pending:
+            text, duration_ms, source = pending
+            QTimer.singleShot(0, lambda t=text, d=duration_ms, s=source: self.show_bubble(t, d, s))
 
     def set_expression(self, expression: str) -> None:
         self.expression = expression
