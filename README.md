@@ -22,6 +22,14 @@ Inside the app, the rover's in-character persona is `Wally`.
 - Balanced cleaning behavior: Wally batch-collects debris, avoids bin-orbit loops, and returns to playful behavior after cleanup.
 - New settings for `EVA` flyby speed and flyby duration.
 
+## Screenshots
+
+![Wally watching the taskbar world with butterflies and cleanup props](docs/screenshots/wally-garden-scene.png)
+
+![Wally reacting with a speech bubble during a desktop moment](docs/screenshots/wally-bubble-scene.png)
+
+![Wally chasing EVA in a lovestruck flyby moment](docs/screenshots/wally-eva-flyby.png)
+
 ## Requirements
 
 - Python 3.10+
