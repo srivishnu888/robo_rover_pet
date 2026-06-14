@@ -10,6 +10,7 @@ Inside the app, the rover's in-character persona is `Wally`.
 - Uses a local Ollama model for short in-character comments and reactions.
 - Uses built-in cute robot voice sounds on Windows for expressive chirps, pseudo-speech, and emotional reactions.
 - Reacts to typing, scrolling, mouse movement, workload pressure, and optional screenshot summaries.
+- Turns real typing activity into visible virtual trash piles; when workload pressure gets too high, Wally can throw a tiny tantrum and nudge you to take a break.
 - Tries to relieve stress by interrupting work with playful reactions and break nudges.
 - Supports quick local reminders and reminder alerts.
 - Performs playful actions like watching TV, kicking a basketball, chasing butterflies, cleaning debris, and reacting dramatically to special events.
@@ -24,6 +25,7 @@ Inside the app, the rover's in-character persona is `Wally`.
 - New settings for `EVA` flyby speed and flyby duration.
 - Integrated desktop-pet sound system with alternating `WALL-E`-style voice clips, chirps, stun variations, `EVA` flyby audio, and contextual special sounds.
 - Mini-chat now supports quick sound toggles like `mute`, `silent`, `sounds off`, `unmute`, and `sounds on`.
+- Workload trash system: typing and scrolling can gradually build visible mess, and overload can trigger a break-style tantrum reaction.
 
 ## Screenshots
 
@@ -86,6 +88,14 @@ robo-rover-pet
 - Drop it high above the taskbar: parachute/fall behavior
 - Press `Enter`, `Space`, or double-click when focused: open chat
 - Use the tray icon or right-click menu for quick actions and toggles
+
+## Workload And Trash Behavior
+
+- Wally can turn sustained typing into visible trash/debris on the desktop.
+- A longer writing session can create larger mess piles over time.
+- If the work-pressure meter gets high enough, Wally may throw a small tantrum, toss trash dramatically, and push for a break.
+- This behavior can be enabled or disabled in Settings with the typing/work-trash option.
+- The current word-based pile trigger is implemented in code and can be tuned further if you want different pacing.
 
 ## Mini-Chat Commands
 
