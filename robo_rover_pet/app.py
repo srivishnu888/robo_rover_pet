@@ -2514,6 +2514,9 @@ class PetWindow(QWidget):
         self.expression = "happy"
         self.blink_amount = 0.0
         self.bubble_text = ""
+        self.bubble_source = "static"
+        self._bubble_shown_at = 0.0
+        self._bubble_protected_until = 0.0
         self.bubble_timer: Optional[QTimer] = None
         self.drag_offset: Optional[QPoint] = None
         self.is_dragging = False
@@ -3253,6 +3256,10 @@ class PetWindow(QWidget):
             self._remember_event("tiny_tool_used", text="summon_eva", data={"did": "tool_summon_eva_flyby"})
             self._eva_flyby_event(force=True)
             return True
+        if t in {"react to screen now", "check screen", "check my screen", "look at my screen", "look at screen", "screen check", "analyze screen", "react to screen"}:
+            self._remember_event("tiny_tool_used", text="manual_screen_check", data={"did": "tool_manual_screen_check"})
+            self.request_ai_reaction("manual_screen_check", force=True, use_vision=True)
+            return True
         if t in {"mute", "silent", "be silent", "go silent", "mute sounds", "sounds off", "sound off", "voice off", "stop sounds", "stop sound"}:
             self._remember_event("tiny_tool_used", text="sounds_off", data={"did": "tool_sounds_off"})
             self._set_tts_enabled(False)
@@ -3493,6 +3500,9 @@ class PetWindow(QWidget):
         self.mini_chat.set_busy(False)
         self.worker = None
         self._forget_finished_threads()
+        if bool(getattr(self, "_pending_manual_screen_check", False)):
+            self._pending_manual_screen_check = False
+            QTimer.singleShot(120, lambda: self.request_ai_reaction("manual_screen_check", force=True, use_vision=True))
         QTimer.singleShot(2200, lambda: self.set_expression("happy"))
 
     def _thread_running(self, thread: Optional[QThread]) -> bool:
@@ -3504,6 +3514,9 @@ class PetWindow(QWidget):
     def _reaction_worker_finished(self) -> None:
         self.reaction_worker = None
         self._forget_finished_threads()
+        if bool(getattr(self, "_pending_manual_screen_check", False)):
+            self._pending_manual_screen_check = False
+            QTimer.singleShot(120, lambda: self.request_ai_reaction("manual_screen_check", force=True, use_vision=True))
 
     def _status_worker_finished(self) -> None:
         self.status_worker = None
@@ -4082,8 +4095,22 @@ class PetWindow(QWidget):
     def show_bubble(self, text: str, duration_ms: int = 7000, source: str = "static") -> None:
         # Keep bubbles readable; very short durations made lines vanish mid-read.
         duration_ms = max(6500, int(duration_ms))
+        now = time.time()
+        priority_map = {"static": 0, "tool": 1, "user": 2, "ollama": 3, "error": 4}
+        hold_map = {"static": 0.0, "tool": 3.2, "user": 2.4, "ollama": 4.2, "error": 4.8}
+        current_source = str(getattr(self, "bubble_source", "static") or "static")
+        current_priority = priority_map.get(current_source, 0)
+        new_priority = priority_map.get(source, 0)
+        if (
+            self.bubble_text
+            and now < float(getattr(self, "_bubble_protected_until", 0.0))
+            and new_priority < current_priority
+        ):
+            return
         self.bubble_text = text
         self.bubble_source = source
+        self._bubble_shown_at = now
+        self._bubble_protected_until = now + hold_map.get(source, 0.0)
         self.bubble.show_message(text, self.frameGeometry(), duration_ms, source=source)
         if self.bubble_timer:
             self.bubble_timer.stop()
@@ -4095,6 +4122,9 @@ class PetWindow(QWidget):
 
     def _hide_bubble(self) -> None:
         self.bubble_text = ""
+        self.bubble_source = "static"
+        self._bubble_shown_at = 0.0
+        self._bubble_protected_until = 0.0
         self.update()
 
     def set_expression(self, expression: str) -> None:
@@ -5725,19 +5755,43 @@ class PetWindow(QWidget):
         if not self.cfg.ai_reactions_enabled and not force:
             return
         if self._thread_running(self.reaction_worker):
+            if reason == "manual_screen_check":
+                self._pending_manual_screen_check = True
+                if time.time() - float(getattr(self, "_last_manual_screen_feedback_at", 0.0)) > 1.5:
+                    self._last_manual_screen_feedback_at = time.time()
+                    self.show_bubble("Finishing a thought, then checking the screen.", 2400, source="tool")
+                return
             self._schedule_next_ambient_ai()
             return
         if self._thread_running(self.worker):
+            if reason == "manual_screen_check":
+                self._pending_manual_screen_check = True
+                if time.time() - float(getattr(self, "_last_manual_screen_feedback_at", 0.0)) > 1.5:
+                    self._last_manual_screen_feedback_at = time.time()
+                    self.show_bubble("Let me finish chatting, then I’ll look.", 2400, source="tool")
+                return
             self._schedule_next_ambient_ai()
             return
 
         include_screenshot = bool(self.cfg.screenshot_reactions_enabled) if use_vision is None else bool(use_vision)
-        include_screenshot = include_screenshot and bool(self.cfg.screenshot_reactions_enabled)
+        if reason != "manual_screen_check":
+            include_screenshot = include_screenshot and bool(self.cfg.screenshot_reactions_enabled)
+        if reason == "manual_screen_check" and not user_instruction:
+            user_instruction = (
+                "Look at the current screen and react to one specific visible thing. "
+                "Be concrete, fresh, and meaningful, not generic."
+            )
+            self._last_screen_question = "manual screen check"
+            self.show_bubble("Looking at the screen...", 2200, source="tool")
         if user_instruction:
             self._pending_user_instruction = user_instruction
             self._last_user_instruction = user_instruction
         context = self._build_brain_context(reason=reason, include_screenshot=include_screenshot, consume_counts=True)
         image_b64 = self._capture_screen_base64() if include_screenshot else None
+        if reason == "manual_screen_check" and include_screenshot and not image_b64:
+            self.show_bubble("I couldn't capture the screen, using local vibes instead.", 2800, source="error")
+            self._apply_local_screen_reaction(reason)
+            return
         context["vision_image_attached"] = bool(image_b64)
         context["ollama_request"] = {
             "model": self.cfg.model,
@@ -5909,9 +5963,8 @@ class PetWindow(QWidget):
         if not self.cfg.ai_reactions_enabled:
             self.ai_reaction_timer.stop()
             return
-        low = max(1, self.cfg.reaction_min_minutes)
-        high = max(low, self.cfg.reaction_max_minutes)
-        interval_ms = random.randint(low * 60_000, high * 60_000)
+        # Always do a real screen-based reaction on a gentle random cadence.
+        interval_ms = random.randint(60_000, 180_000)
         self.ai_reaction_timer.start(interval_ms)
 
     def _schedule_next_ambient_ai(self) -> None:
