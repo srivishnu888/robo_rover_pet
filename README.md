@@ -1,19 +1,26 @@
 # Robo Rover Pet
 
-`Robo Rover Pet` is a virtual desktop pet built to distract you from stress, keep your desktop feeling alive, and add playful interaction to long work sessions. It lives near your taskbar, acts autonomously, comments on what you type by using a local LLM, reacts to how much work you are doing, nudges you to take breaks, helps with quick reminders, and turns your desktop into something more fun and less tense.
+`Robo Rover Pet` is a vibe-coded virtual desktop pet built to break up stress, make your desktop feel alive, and add playful local-AI interaction to long work sessions. It lives near your taskbar, acts autonomously, comments on what you type by using a local LLM, reacts to how much work you are doing, nudges you to take breaks, and helps with quick reminders.
 
-The pet's public project name is `Robo Rover Pet`. Inside the app, the character currently refers to itself as `Wally`, which is the rover's in-app persona.
+Inside the app, the rover's in-character persona is `Wally`.
 
 ## What It Does
 
 - Runs as a floating autonomous desktop pet with tray icon support.
-- Uses a local Ollama model to make short in-character comments about your typing and desktop activity for fun interaction.
-- Reacts to mouse movement, typing, scrolling, workload pressure, and optional screenshot summaries.
+- Uses a local Ollama model for short in-character comments and reactions.
+- Reacts to typing, scrolling, mouse movement, workload pressure, and optional screenshot summaries.
 - Tries to relieve stress by interrupting work with playful reactions and break nudges.
-- Supports quick reminder parsing and local reminder alerts.
-- Opens a mini chat and a larger chat window for commands and conversation.
-- Performs playful actions like watching TV, kicking a basketball, chasing butterflies, singing, dancing, and cleaning debris.
-- Stores settings locally in `~/.robo_rover_pet/settings_v8_33.json`.
+- Supports quick local reminders and reminder alerts.
+- Performs playful actions like watching TV, kicking a basketball, chasing butterflies, cleaning debris, and reacting dramatically to special events.
+- Stores settings locally in `~/.robo_rover_pet/`.
+
+## Latest Features
+
+- `EVA` flyby event: an original white drone visitor can now sweep across the taskbar sky.
+- Wally can become lovestruck, chase EVA across the screen, then briefly sulk when she leaves.
+- Post-EVA recovery can spill into butterfly chasing and dramatic ball kicks.
+- Balanced cleaning behavior: Wally batch-collects debris, avoids bin-orbit loops, and returns to playful behavior after cleanup.
+- New settings for `EVA` flyby speed and flyby duration.
 
 ## Requirements
 
@@ -21,8 +28,8 @@ The pet's public project name is `Robo Rover Pet`. Inside the app, the character
 - Ollama installed locally
 - A local Ollama model, default: `ministral-3:3b`
 - Desktop OS supported by Qt
-  - Windows is the most directly supported path in the current code
-  - macOS and Linux may work, but may require permissions or extra desktop utilities
+- Windows is the most directly supported path in the current code
+- macOS and Linux may work, but may require permissions or extra desktop utilities
 
 ## Python Dependencies
 
@@ -30,7 +37,7 @@ Runtime dependencies from [requirements.txt](requirements.txt):
 
 - `PySide6`
 - `requests`
-- `pynput` for global typing/scroll awareness
+- `pynput`
 
 Optional:
 
@@ -41,8 +48,6 @@ Build dependency from [requirements-build.txt](requirements-build.txt):
 - `pyinstaller`
 
 ## Quick Start
-
-### Standard Run
 
 ```powershell
 cd C:\Projects\research\robo_rover_pet\robo_rover_pet
@@ -55,20 +60,11 @@ ollama serve
 python run.py
 ```
 
-### Install As a Local Python App
-
-This repo now includes Python packaging metadata, so you can install it like an app:
+You can also install it as a local Python app:
 
 ```powershell
 cd C:\Projects\research\robo_rover_pet\robo_rover_pet
 python -m pip install .
-robo-rover-pet
-```
-
-If you want isolated global installation, `pipx` is the cleanest option:
-
-```powershell
-pipx install .
 robo-rover-pet
 ```
 
@@ -82,7 +78,7 @@ robo-rover-pet
 
 ## Mini-Chat Commands
 
-The app has a lightweight local command router before it falls back to Ollama chat. These commands are explicitly supported in the current codebase:
+These commands are explicitly supported in the current codebase:
 
 - `watch tv`
 - `go sofa`
@@ -90,6 +86,8 @@ The app has a lightweight local command router before it falls back to Ollama ch
 - `clean`
 - `clean up`
 - `clean this mess`
+- `collect trash`
+- `dump trash in bin`
 - `kick the ball`
 - `play basketball`
 - `send butterfly`
@@ -98,6 +96,10 @@ The app has a lightweight local command router before it falls back to Ollama ch
 - `send wind`
 - `send leaves`
 - `send debris`
+- `send eva`
+- `summon eva`
+- `eva flyby`
+- `call eva`
 - `throw trash for attention`
 - `list reminders`
 - `show reminders`
@@ -124,6 +126,7 @@ The tray icon and pet context menu expose actions such as:
 - `Show last LLM decision`
 - `Drop leaves/paper`
 - `Release a butterfly`
+- `Send EVA flyby`
 - `Show pending reminders`
 - `Show Pet`
 - `Hide`
@@ -143,14 +146,14 @@ They also expose toggles for:
 ## Ollama Notes
 
 - The app is local-first and expects Ollama at `http://127.0.0.1:11434` by default.
-- If Ollama is offline, some local utility behavior still works, but AI personality features, richer reactions, and model-based reminder parsing degrade or stop.
-- If the selected model is missing, the code expects you to run:
+- If Ollama is offline, some local utility behavior still works, but AI personality features and richer reactions degrade or stop.
+- If the selected model is missing, run:
 
 ```powershell
 ollama pull ministral-3:3b
 ```
 
-You can also switch models in settings. The UI already includes options like:
+You can switch models in settings. The UI already includes options like:
 
 - `ministral-3:3b`
 - `qwen3-vl:2b`

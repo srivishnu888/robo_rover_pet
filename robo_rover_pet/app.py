@@ -68,7 +68,7 @@ from .llm import DEFAULT_PERSONALITY, OllamaClient, OllamaConfig, OllamaError, c
 
 
 ORG_NAME = "LocalDesktopPets"
-APP_NAME = "RoboRoverPetV8_32"
+APP_NAME = "RoboRoverPetV8_37"
 BASE_W = 340
 BASE_H = 285
 DEFAULT_SCALE_PERCENT = 33
@@ -150,6 +150,11 @@ RIVET_INNER_THOUGHTS = [
     "can I make chaos responsibly?",
     "should I throw and then clean?",
     "should I stop talking and do something?",
+    "is that EVA in the sky?",
+    "EVA flew by again?",
+    "should I chase EVA dramatically?",
+    "if EVA leaves, maybe kick sadness into the ball.",
+    "butterflies can fix heartbreak, right?",
 ]
 
 
@@ -187,6 +192,8 @@ class RuntimeConfig:
     reaction_max_minutes: int
     speech_max_words: int
     work_trash_enabled: bool
+    eva_speed_percent: int
+    eva_duration_seconds: int
     personality: str
 
 
@@ -258,7 +265,7 @@ class SettingsStore:
         base = os.environ.get("ROBO_ROVER_CONFIG_DIR")
         self.config_dir = Path(base) if base else Path.home() / ".robo_rover_pet"
         self.config_dir.mkdir(parents=True, exist_ok=True)
-        self.config_path = self.config_dir / "settings_v8_33.json"
+        self.config_path = self.config_dir / "settings_v8_37.json"
         self.file_values: Dict[str, object] = self._load_file_values()
 
     def _load_file_values(self) -> Dict[str, object]:
@@ -338,6 +345,8 @@ class SettingsStore:
             reaction_max_minutes=max_minutes,
             speech_max_words=max(4, min(24, self.integer("pet/speech_max_words", 9))),
             work_trash_enabled=self.boolean("pet/work_trash_enabled", True),
+            eva_speed_percent=max(100, min(400, self.integer("pet/eva_speed_percent", 250))),
+            eva_duration_seconds=max(10, min(90, self.integer("pet/eva_duration_seconds", 38))),
             personality=self.string("pet/personality", DEFAULT_PERSONALITY),
         )
 
@@ -418,6 +427,19 @@ class SettingsDialog(QDialog):
         self.work_trash_checkbox = QCheckBox("Typing makes mess pile up; Wally may tantrum when overworked")
         self.work_trash_checkbox.setChecked(cfg.work_trash_enabled)
 
+        self.eva_speed_spin = QSpinBox()
+        self.eva_speed_spin.setRange(100, 400)
+        self.eva_speed_spin.setSingleStep(25)
+        self.eva_speed_spin.setSuffix("%")
+        self.eva_speed_spin.setValue(cfg.eva_speed_percent)
+        self.eva_speed_spin.setToolTip("EVA flyby speed. 250% is about 2-3x faster than the original flyby.")
+
+        self.eva_duration_spin = QSpinBox()
+        self.eva_duration_spin.setRange(10, 90)
+        self.eva_duration_spin.setSuffix(" sec")
+        self.eva_duration_spin.setValue(cfg.eva_duration_seconds)
+        self.eva_duration_spin.setToolTip("How long EVA stays on screen during a flyby.")
+
         self.react_min_spin = QSpinBox()
         self.react_min_spin.setRange(1, 120)
         self.react_min_spin.setSuffix(" min")
@@ -454,6 +476,8 @@ class SettingsDialog(QDialog):
         form.addRow("Pet size", self.scale_spin)
         form.addRow("Bubble word limit", self.speech_words_spin)
         form.addRow("", self.work_trash_checkbox)
+        form.addRow("EVA flyby speed", self.eva_speed_spin)
+        form.addRow("EVA flyby time", self.eva_duration_spin)
         form.addRow("Scene reaction interval", interval_row)
         form.addRow("", self.thinking_checkbox)
         form.addRow("", self.tts_checkbox)
@@ -491,6 +515,8 @@ class SettingsDialog(QDialog):
         self.store.set_value("pet/scale_percent", self.scale_spin.value())
         self.store.set_value("pet/speech_max_words", self.speech_words_spin.value())
         self.store.set_value("pet/work_trash_enabled", self.work_trash_checkbox.isChecked())
+        self.store.set_value("pet/eva_speed_percent", self.eva_speed_spin.value())
+        self.store.set_value("pet/eva_duration_seconds", self.eva_duration_spin.value())
         self.store.set_value("awareness/ai_reactions_enabled", self.ai_reactions_checkbox.isChecked())
         self.store.set_value("awareness/screen_awareness_enabled", self.awareness_checkbox.isChecked())
         self.store.set_value("awareness/screenshot_reactions_enabled", self.screenshot_checkbox.isChecked())
@@ -1225,6 +1251,17 @@ class DebrisOverlay(QWidget):
         self.butterfly_vx = 0.9
         self.butterfly_phase = 0.0
         self.butterfly_end_at = 0.0
+        self.eva_visible = False
+        self.eva_x = 0.0
+        self.eva_y = 0.0
+        self.eva_vx = 0.0
+        self.eva_phase = 0.0
+        self.eva_end_at = 0.0
+        self.eva_base_y = 0.0
+        self.eva_turns_left = 0
+        self.eva_next_mid_turn_at = 0.0
+        self.eva_last_turn_reason = "none"
+        self.eva_name = "EVA"
         self.ball = Basketball(142.0, 72.0, visible=True)
         self._ball_centered_once = False
         self.ball_phase = 0.0
@@ -1473,6 +1510,103 @@ class DebrisOverlay(QWidget):
             "mood_hint": "fluttering near the taskbar edge" if self.butterfly_visible else "none",
         }
 
+    def summon_eva_flyby(self) -> None:
+        """A tiny original white drone visitor: fast dramatic zigzag flyby."""
+        w = max(1, self.width())
+        h = max(1, self.height())
+        cfg = self.store.config()
+        speed_mult = max(1.0, min(4.0, cfg.eva_speed_percent / 100.0))
+        duration = max(10.0, min(90.0, float(cfg.eva_duration_seconds)))
+        from_left = random.random() < 0.5
+        self.eva_visible = True
+        # Keep the whole visitor inside the overlay; her trail/arms need margin.
+        edge = max(88.0, min(118.0, w * 0.075))
+        self.eva_x = edge if from_left else w - edge
+        upper_band = max(58.0, min(h - 126.0, h * 0.42))
+        self.eva_base_y = random.uniform(48.0, upper_band)
+        self.eva_y = self.eva_base_y
+        # Default setting is 250%, roughly 2-3x the previous speed.
+        speed = random.uniform(5.8, 8.8) * speed_mult
+        self.eva_vx = speed if from_left else -speed
+        # Duration controls when she leaves; turns are only for drama, not early termination.
+        self.eva_turns_left = max(8, int(duration / 2.4))
+        self.eva_phase = random.uniform(0, math.tau)
+        self.eva_next_mid_turn_at = time.time() + random.uniform(0.9, 2.4)
+        self.eva_last_turn_reason = "launch"
+        self.eva_end_at = time.time() + duration
+        self.raise_()
+        self.update()
+
+    def _update_eva(self, w: int, h: int) -> None:
+        if not self.eva_visible:
+            return
+        now = time.time()
+        cfg = self.store.config()
+        speed_mult = max(1.0, min(4.0, cfg.eva_speed_percent / 100.0))
+
+        self.eva_phase += 0.29 + 0.035 * min(4.0, speed_mult)
+
+        # Random mid-air direction changes: not only wall bounces.
+        if now >= self.eva_next_mid_turn_at:
+            if random.random() < 0.64:
+                self.eva_vx = -self.eva_vx * random.uniform(0.86, 1.14)
+                self.eva_last_turn_reason = "midair_turn"
+                self.eva_turns_left -= 1
+            else:
+                self.eva_vx *= random.uniform(0.92, 1.16)
+                self.eva_last_turn_reason = "speed_juke"
+            y_max = max(58.0, min(h - 126.0, h * 0.46))
+            self.eva_base_y = random.uniform(48.0, y_max)
+            self.eva_next_mid_turn_at = now + random.uniform(0.75, 2.35)
+
+        # Fast horizontal motion with uneven speed and dramatic vertical weave.
+        self.eva_x += self.eva_vx * (0.92 + 0.34 * math.sin(self.eva_phase * 0.9))
+        zig = (
+            30.0 * math.sin(self.eva_phase * 0.88)
+            + 13.0 * math.sin(self.eva_phase * 2.55)
+            + 5.0 * math.sin(self.eva_phase * 4.1)
+        )
+        self.eva_y = self.eva_base_y + zig
+        self.eva_y = max(50, min(max(56, h - 126), self.eva_y))
+
+        # Bounce left/right while keeping full visitor visible.
+        edge = max(88.0, min(118.0, w * 0.075))
+        if self.eva_x > w - edge:
+            self.eva_x = w - edge
+            self.eva_vx = -abs(self.eva_vx) * random.uniform(0.90, 1.15)
+            self.eva_base_y = random.uniform(48.0, max(58.0, min(h - 126.0, h * 0.46)))
+            self.eva_next_mid_turn_at = now + random.uniform(0.65, 1.9)
+            self.eva_last_turn_reason = "right_wall_bounce"
+            self.eva_turns_left -= 1
+        elif self.eva_x < edge:
+            self.eva_x = edge
+            self.eva_vx = abs(self.eva_vx) * random.uniform(0.90, 1.15)
+            self.eva_base_y = random.uniform(48.0, max(58.0, min(h - 126.0, h * 0.46)))
+            self.eva_next_mid_turn_at = now + random.uniform(0.65, 1.9)
+            self.eva_last_turn_reason = "left_wall_bounce"
+            self.eva_turns_left -= 1
+
+        if now > self.eva_end_at:
+            self.eva_visible = False
+            self.update()
+    def eva_point_global(self) -> Optional[QPoint]:
+        if not self.eva_visible:
+            return None
+        geo = self.geometry()
+        return QPoint(int(geo.left() + self.eva_x), int(geo.top() + self.eva_y))
+
+    def eva_status(self) -> Dict[str, object]:
+        point = self.eva_point_global()
+        return {
+            "visible": self.eva_visible,
+            "global_xy": [point.x(), point.y()] if point else None,
+            "name": self.eva_name,
+            "mood_hint": "white drone visitor flying fast across the taskbar sky" if self.eva_visible else "gone",
+            "speed_px_per_tick": round(abs(self.eva_vx), 2) if self.eva_visible else 0,
+            "last_turn": getattr(self, "eva_last_turn_reason", "none"),
+            "seconds_left": round(max(0.0, self.eva_end_at - time.time()), 1) if self.eva_visible else 0,
+        }
+
     def ball_point_global(self) -> Optional[QPoint]:
         if not getattr(self.ball, "visible", False):
             return None
@@ -1597,8 +1731,9 @@ class DebrisOverlay(QWidget):
         self.tv_phase += 0.08
         self.tree_phase += 0.05 + min(0.055, abs(self.wind) * 0.052)
         self._update_butterfly(w, h)
-        if self.butterfly_visible:
-            # Butterfly should visually float above the mini chat and all props.
+        self._update_eva(w, h)
+        if self.butterfly_visible or self.eva_visible:
+            # Air visitors should visually float above the mini chat and all props.
             self.raise_()
         self._update_ball(w, h)
 
@@ -1858,6 +1993,8 @@ class DebrisOverlay(QWidget):
             self._draw_basketball(p)
         if self.butterfly_visible:
             self._draw_butterfly(p)
+        if self.eva_visible:
+            self._draw_eva(p)
         for item in self.items:
             p.save()
             p.translate(item.x, item.y)
@@ -1921,6 +2058,49 @@ class DebrisOverlay(QWidget):
         p.setPen(QPen(QColor(55, 48, 63, 190), 0.8))
         p.drawLine(QPointF(-1, -3), QPointF(-5, -7))
         p.drawLine(QPointF(1, -3), QPointF(5, -7))
+        p.restore()
+
+    def _draw_eva(self, p: QPainter) -> None:
+        p.save()
+        p.translate(self.eva_x, self.eva_y)
+        if self.eva_vx < 0:
+            p.scale(-1, 1)
+        bob = math.sin(self.eva_phase * 1.7)
+        # soft glow
+        p.setBrush(QColor(255, 255, 255, 56))
+        p.setPen(Qt.NoPen)
+        p.drawEllipse(QPointF(0, 2 + bob), 30, 22)
+        # compact white drone body
+        body = QPainterPath()
+        body.addRoundedRect(QRectF(-21, -17 + bob, 42, 34), 18, 18)
+        p.setBrush(QColor(250, 250, 246, 244))
+        p.setPen(QPen(QColor(186, 190, 190, 200), 1.2))
+        p.drawPath(body)
+        # dark face visor
+        visor = QRectF(-15, -8 + bob, 30, 16)
+        p.setBrush(QColor(33, 42, 49, 235))
+        p.setPen(QPen(QColor(92, 130, 150, 180), 1.0))
+        p.drawRoundedRect(visor, 8, 8)
+        p.setBrush(QColor(89, 224, 255, 225))
+        p.setPen(Qt.NoPen)
+        p.drawEllipse(QPointF(-5, -1 + bob), 2.2, 2.2)
+        p.drawEllipse(QPointF(5, -1 + bob), 2.2, 2.2)
+        # little wing/arms
+        p.setPen(QPen(QColor(217, 218, 210, 230), 3.0, Qt.SolidLine, Qt.RoundCap))
+        p.drawLine(QPointF(-20, 2 + bob), QPointF(-31, 8 + bob))
+        p.drawLine(QPointF(20, 2 + bob), QPointF(31, 8 + bob))
+        # hearts trail
+        p.setPen(Qt.NoPen)
+        for i in range(3):
+            alpha = max(70, 190 - i * 45)
+            p.setBrush(QColor(255, 108, 160, alpha))
+            x = -36 - i * 12
+            y = -10 + math.sin(self.eva_phase + i) * 4
+            path = QPainterPath()
+            path.moveTo(x, y)
+            path.cubicTo(x - 5, y - 7, x - 12, y, x, y + 9)
+            path.cubicTo(x + 12, y, x + 5, y - 7, x, y)
+            p.drawPath(path)
         p.restore()
 
     def _draw_leaf(self, p: QPainter, size: float, color: str) -> None:
@@ -2446,6 +2626,13 @@ class PetWindow(QWidget):
         self._butterfly_event_llm_window_seen = 0
         self._butterfly_event_llm_window_sent = 0
         self._resume_after_butterfly_chase: Optional[Dict[str, object]] = None
+        self._last_eva_event_llm_at = 0.0
+        self._eva_recovery_until = 0.0
+        self._eva_sad_until = 0.0
+        self._eva_chase_lock_until = 0.0
+        self._eva_miss_started = False
+        self._eva_last_call_at = 0.0
+        self._eva_flyby_seen = 0
 
         self.animation_timer = QTimer(self)
         self.animation_timer.setInterval(33)
@@ -2480,6 +2667,10 @@ class PetWindow(QWidget):
         self.butterfly_timer.setSingleShot(True)
         self.butterfly_timer.timeout.connect(self._butterfly_event)
 
+        self.eva_timer = QTimer(self)
+        self.eva_timer.setSingleShot(True)
+        self.eva_timer.timeout.connect(self._eva_flyby_event)
+
         self._create_tray_icon()
         self._place_initially()
         self._update_taskbar_lane()
@@ -2495,6 +2686,7 @@ class PetWindow(QWidget):
         self._schedule_next_ai_reaction()
         self._schedule_next_ambient_ai()
         self._schedule_next_butterfly()
+        self._schedule_next_eva_flyby()
         QTimer.singleShot(1200, self.snap_to_taskbar_lane)
         QTimer.singleShot(1800, lambda: self.request_ai_reaction("startup_self_intro", force=True, use_vision=False))
 
@@ -2563,6 +2755,8 @@ class PetWindow(QWidget):
         summon.triggered.connect(lambda: self.debris_overlay.summon_debris(12))
         butterfly = menu.addAction("Release a butterfly")
         butterfly.triggered.connect(lambda: self._butterfly_event(force=True))
+        eva = menu.addAction("Send EVA flyby")
+        eva.triggered.connect(lambda: self._eva_flyby_event(force=True))
         reminders = menu.addAction("Show pending reminders")
         reminders.triggered.connect(self._show_pending_reminders)
         show_action = menu.addAction("Show Pet")
@@ -2814,7 +3008,7 @@ class PetWindow(QWidget):
         self.action_memory = self.action_memory[-32:]
 
     def _reminders_path(self) -> Path:
-        return self.store.config_dir / "reminders_v8_33.json"
+        return self.store.config_dir / "reminders_v8_34.json"
 
     def _load_reminders(self) -> List[ReminderItem]:
         path = self._reminders_path()
@@ -3033,18 +3227,22 @@ class PetWindow(QWidget):
             self._remember_event("tiny_tool_used", text="summon_butterfly", data={"did": "tool_summon_butterfly"})
             self._butterfly_event(force=True)
             return True
+        if any(p in t for p in ["send eva", "summon eva", "eva flyby", "bring eva", "call eva"]):
+            self._remember_event("tiny_tool_used", text="summon_eva", data={"did": "tool_summon_eva_flyby"})
+            self._eva_flyby_event(force=True)
+            return True
         if any(p in t for p in ["send wind", "summon wind", "send leaves", "send debris", "send trash"]):
             return self._execute_wind_summon_command(raw)
         if re.search(r"\b(clean|clean up|clean this|sweep)\b", t):
             self._apply_reaction_action("clean", 2, "nearest_debris")
             self.show_bubble("Tiny cleaning mission.", 7500, source="tool")
             return True
-        if any(p in t for p in ["watch tv", "go sofa", "sit sofa", "tv break"]):
+        if any(p in t for p in ["watch tv", "go sofa", "sit sofa", "tv break", "send eva", "summon eva", "eva flyby"]):
             self._apply_reaction_action("watch_tv", 2, "tv_sofa")
             self.show_bubble("TV break authorized.", 7500, source="tool")
             return True
         if t in {"skills", "show skills", "what can you do", "tiny tools"}:
-            self.show_bubble("Reminders, ball, butterfly, trash, wind, clean.", 11000, source="tool")
+            self.show_bubble("Reminders, ball, butterfly, EVA, trash, wind.", 11000, source="tool")
             return True
         return False
 
@@ -3284,7 +3482,7 @@ class PetWindow(QWidget):
     def shutdown_workers(self) -> None:
         """Stop timers and QThreads before Qt destroys widgets during app shutdown."""
         self._shutdown_in_progress = True
-        for timer_name in ("animation_timer", "behavior_timer", "activity_timer", "reminder_timer", "ai_reaction_timer", "ai_heartbeat_timer", "butterfly_timer", "bubble_timer"):
+        for timer_name in ("animation_timer", "behavior_timer", "activity_timer", "reminder_timer", "ai_reaction_timer", "ai_heartbeat_timer", "butterfly_timer", "eva_timer", "bubble_timer"):
             timer = getattr(self, timer_name, None)
             try:
                 if timer is not None:
@@ -3486,6 +3684,9 @@ class PetWindow(QWidget):
         elif self.current_action == "chase_butterfly":
             self.eye_focus = "butterfly"
             self.eyebrow_pose = "happy"
+        elif self.current_action == "chase_eva":
+            self.eye_focus = "up"
+            self.eyebrow_pose = "love"
         elif self.current_action in {"watch_tv", "watch"}:
             self.eye_focus = "tv"
         elif self.current_action == "inspect_mouse":
@@ -3674,7 +3875,7 @@ class PetWindow(QWidget):
                 self.target_point = self._ball_target_point()
                 self._remember_event("ball_kick_delayed_until_contact", text="moving to ball", data={"did": "move_to_ball_before_kick", "reason": reason})
                 return
-        super_kick = self._choose_super_ball_kick()
+        super_kick = reason in {"eva_sad_angry_kick", "eva_sad_super_kick"} or self._choose_super_ball_kick()
         style = random.choice(["roll", "chip", "lob", "side_spin", "bounce_shot"])
         power = random.uniform(3.4, 5.6) if super_kick else random.uniform(0.75, 2.15)
         kick = self.debris_overlay.kick_ball_global(
@@ -3825,6 +4026,10 @@ class PetWindow(QWidget):
             self.eyebrow_pose = "curious"
             self.eye_focus = "side"
         self._update_eye_focus_from_action()
+        if self.current_action == "chase_eva" and not self.debris_overlay.eva_visible and time.time() > self._eva_sad_until:
+            self._start_eva_miss_mood()
+            self.update()
+            return
         if self._maybe_ball_cross_encounter():
             self.update()
             return
@@ -3852,7 +4057,7 @@ class PetWindow(QWidget):
             self.update()
             return
 
-        moving_now = self.target_point is not None or self.current_action in {"clean", "go_bin", "chase_butterfly", "inspect_mouse", "watch_tv", "move_to", "kick_ball"}
+        moving_now = self.target_point is not None or self.current_action in {"clean", "go_bin", "chase_butterfly", "chase_eva", "inspect_mouse", "watch_tv", "move_to", "kick_ball"}
         if (self.store.config().roam_enabled or moving_now) and not self.is_dragging and self.isVisible():
             self._roam_step()
             # Second check after movement catches real visual crossings from this frame.
@@ -3866,7 +4071,7 @@ class PetWindow(QWidget):
             # turn it into a bin shuttle.
             if self.current_action == "clean":
                 self._clear_debris_under_pet(extra_radius=58, incidental=False)
-            elif self.current_action in {"move_to", "chase_butterfly", "watch_tv", "inspect_mouse", "roam", "dance"}:
+            elif self.current_action in {"move_to", "chase_butterfly", "chase_eva", "watch_tv", "inspect_mouse", "roam", "dance"}:
                 self._clear_debris_under_pet(extra_radius=42, incidental=True)
         if self.tick % 30 == 0:
             self._update_taskbar_lane()
@@ -4035,7 +4240,7 @@ class PetWindow(QWidget):
         now = time.time()
         if not force and now < self._tv_break_until:
             return True
-        if self.current_action in {"clean", "go_bin", "chase_butterfly", "fall", "parachute"} and self.target_point is not None and not force:
+        if self.current_action in {"clean", "go_bin", "chase_butterfly", "chase_eva", "fall", "parachute"} and self.target_point is not None and not force:
             return False
         self._tv_break_reason = reason
         self._tv_break_duration_seconds = 30.0
@@ -4092,7 +4297,7 @@ class PetWindow(QWidget):
             return True
         if now - getattr(self, "_last_tv_break_started_at", now) < 300:
             return False
-        critical = {"clean", "go_bin", "chase_butterfly", "fall", "parachute"}
+        critical = {"clean", "go_bin", "chase_butterfly", "chase_eva", "fall", "parachute"}
         if active_moving and self.current_action in critical:
             return False
         return self._start_tv_break("scheduled_5_min_tv_break", force=True)
@@ -4154,7 +4359,12 @@ class PetWindow(QWidget):
         now = time.time()
         self._update_mood_model()
         debris_count = self.debris_overlay.item_count() if self.cfg.debris_enabled else 0
-        active_moving = self.current_action in {"clean", "go_bin", "chase_butterfly", "watch_tv", "move_to", "kick_ball", "inspect_mouse", "kick_ball"} and self.target_point is not None
+        active_moving = self.current_action in {"clean", "go_bin", "chase_butterfly", "chase_eva", "watch_tv", "move_to", "kick_ball", "inspect_mouse", "kick_ball"} and self.target_point is not None
+
+        # Do not let TV breaks, cleaning, roaming, or random goals steal the EVA chase.
+        if self.debris_overlay.eva_visible and self.current_action == "chase_eva":
+            self.target_point = self._eva_target_point()
+            return
 
         if self._maybe_scheduled_tv_break(now, active_moving):
             return
@@ -4267,7 +4477,18 @@ class PetWindow(QWidget):
             if (abs(snapped.x() - self.x()) > 2 or abs(snapped.y() - self.y()) > 2) and not self.is_dragging:
                 self.move(snapped)
 
-        moving_actions = {"clean", "go_bin", "chase_butterfly", "inspect_mouse", "watch_tv", "move_to", "kick_ball"}
+        # EVA chase lock: when EVA is visible, Wally keeps chasing until she leaves.
+        if self.debris_overlay.eva_visible and (self.current_action == "chase_eva" or time.time() < getattr(self, "_eva_chase_lock_until", 0.0)):
+            self.current_action = "chase_eva"
+            self.pause_until = 0.0
+            self.target_point = self._eva_target_point()
+            self.set_expression("love")
+            self._apply_body_controls({"antenna": "heart", "eyes": "up", "eyebrow": "love", "emoji": "💛", "left_arm": "cheer", "right_arm": "wave"})
+            if time.time() - getattr(self, "_eva_last_call_at", 0.0) > 6.5:
+                self._eva_last_call_at = time.time()
+                self.show_bubble(random.choice(["EVAAA! 💛", "Wait for me!", "Tiny heart sprint!", "EVA, look! 💛"]), 5200, source="static")
+
+        moving_actions = {"clean", "go_bin", "chase_butterfly", "chase_eva", "inspect_mouse", "watch_tv", "move_to", "kick_ball"}
         still_actions = {"talk_to_user", "listen", "nap", "recharge", "investigate", "watch", "pause", "chill"}
         if time.time() < self.pause_until and self.current_action not in moving_actions:
             return
@@ -4278,6 +4499,13 @@ class PetWindow(QWidget):
             target = self._butterfly_target_point()
             if target is not None:
                 self.target_point = target
+        elif self.current_action == "chase_eva":
+            target = self._eva_target_point()
+            if target is not None:
+                self.target_point = target
+            elif time.time() > self._eva_sad_until:
+                self._start_eva_miss_mood()
+                return
         elif self.current_action == "inspect_mouse":
             if self.tick % 9 == 0:
                 self.target_point = self._mouse_target_point()
@@ -4347,6 +4575,10 @@ class PetWindow(QWidget):
                 self.current_action = "pause"
                 self.pause_until = time.time() + random.uniform(2.5, 5.0)
                 self._remember_event("caught_up_to_butterfly", text="butterfly chase", data={"did": "caught_butterfly_moment", "butterfly": self.debris_overlay.butterfly_status()})
+                if time.time() < getattr(self, "_eva_recovery_until", 0.0):
+                    self._eva_recovery_until = 0.0
+                    self._nudge_mood(playful=12, excited=8, frustrated=-10, anxious=-5, curious=6)
+                    self.show_bubble("Flutter therapy worked.", 6200, source="static")
                 if self._resume_after_butterfly_chase is not None:
                     QTimer.singleShot(int(max(900, (self.pause_until - time.time()) * 1000 + 300)), self._resume_goal_after_butterfly_chase)
                 if self.cfg.ai_reactions_enabled and not self._thread_running(self.reaction_worker):
@@ -4354,13 +4586,22 @@ class PetWindow(QWidget):
                         self._last_butterfly_event_llm_at = time.time()
                         self._pending_activity_note = {"kind": "caught_up_to_butterfly", "butterfly": self.debris_overlay.butterfly_status(), "tone_choices": ["excited", "funny", "proud", "curious"]}
                         self.request_ai_reaction("caught_up_to_butterfly", use_vision=False)
+            elif self.current_action == "chase_eva":
+                if self.debris_overlay.eva_visible:
+                    target = self._eva_target_point()
+                    if target is not None:
+                        self.target_point = target
+                        return
+                self._start_eva_miss_mood()
             elif self.current_action == "inspect_mouse":
                 self.set_expression("curious")
                 self.current_action = "watch"
                 self.pause_until = time.time() + 6
                 self.debris_overlay.set_tv_mode(random.choice(["movie", "stars", "calm", "hearts"]))
             elif self.current_action == "kick_ball":
-                self._perform_ball_kick("planned_kick")
+                reason = getattr(self, "_pending_ball_kick_reason", "planned_kick")
+                self._pending_ball_kick_reason = "planned_kick"
+                self._perform_ball_kick(reason)
             elif self.current_action == "move_to":
                 self.current_action = "chill"
             self.target_point = None
@@ -4370,6 +4611,9 @@ class PetWindow(QWidget):
             base_speed = 2.1
         elif self.current_action == "chase_butterfly":
             base_speed = 2.9
+        elif self.current_action == "chase_eva":
+            eva_mult = max(1.0, min(4.0, self.cfg.eva_speed_percent / 100.0))
+            base_speed = min(13.8, 6.8 + eva_mult * 1.9)
         elif self.current_action == "inspect_mouse":
             base_speed = 1.7
         elif self.current_action == "kick_ball":
@@ -4387,11 +4631,13 @@ class PetWindow(QWidget):
             now = time.time()
             last = self._last_movement_pos
             moved = abs(last.x() - self.x()) + abs(last.y() - self.y())
-            if moved < 3 and self.current_action in {"clean", "go_bin", "chase_butterfly", "watch_tv", "move_to", "kick_ball"} and now - self._last_movement_check_at > 3:
+            if moved < 3 and self.current_action in {"clean", "go_bin", "chase_butterfly", "chase_eva", "watch_tv", "move_to", "kick_ball"} and now - self._last_movement_check_at > 3:
                 if self.current_action == "clean":
                     self._start_cleaning_behavior()
                 elif self.current_action == "chase_butterfly":
                     self.target_point = self._butterfly_target_point()
+                elif self.current_action == "chase_eva":
+                    self.target_point = self._eva_target_point()
                 elif self.current_action == "go_bin":
                     self.target_point = self._bin_target_point()
                 elif self.current_action == "watch_tv":
@@ -4905,6 +5151,8 @@ class PetWindow(QWidget):
                 "nearest_debris": [nearest.x(), nearest.y()] if nearest else None,
                 "butterfly": [butterfly_pt.x(), butterfly_pt.y()] if butterfly_pt else None,
                 "butterfly_visible": bool(butterfly_pt),
+                "eva": self.debris_overlay.eva_status() if hasattr(self.debris_overlay, "eva_status") else {"visible": False},
+                "eva_recovery_seconds_left": round(max(0.0, getattr(self, "_eva_recovery_until", 0.0) - time.time()), 1),
                 "basketball": self.debris_overlay.ball_status(),
                 "tv_mode": getattr(self.debris_overlay, "tv_mode", "static"),
                 "tv_break": {
@@ -5053,6 +5301,81 @@ class PetWindow(QWidget):
         self._track_thread(self.reaction_worker)
         self.reaction_worker.start()
 
+    def _schedule_next_eva_flyby(self) -> None:
+        if not hasattr(self, "eva_timer"):
+            return
+        self.eva_timer.start(random.randint(5 * 60_000, 8 * 60_000))
+
+    def _eva_target_point(self) -> Optional[QPoint]:
+        point = self.debris_overlay.eva_point_global()
+        if point is None:
+            return None
+        # Wally runs along the taskbar under EVA, not into the air.
+        # Target includes a small lead so he visibly sprints behind the zigzag.
+        lead = 28 if getattr(self.debris_overlay, "eva_vx", 1.0) > 0 else -28
+        return self._clamp_to_lane(QPoint(point.x() - self.width() // 2 - lead, self.y()))
+
+    def _eva_flyby_event(self, force: bool = False) -> None:
+        self._schedule_next_eva_flyby()
+        if self.debris_overlay.eva_visible and not force:
+            return
+        self.debris_overlay.summon_eva_flyby()
+        self._eva_flyby_seen += 1
+        self._eva_sad_until = 0.0
+        self._eva_miss_started = False
+        self._eva_chase_lock_until = time.time() + max(8.0, self.debris_overlay.eva_end_at - time.time() + 2.0)
+        self._remember_event("eva_flyby_started", text="EVA flew by", data={"did": "notice_eva", "eva": self.debris_overlay.eva_status(), "flyby_index": self._eva_flyby_seen, "chase_lock_seconds": round(self._eva_chase_lock_until - time.time(), 1)})
+        self.set_expression("love")
+        self.current_action = "chase_eva"
+        self.target_point = self._eva_target_point()
+        self.pause_until = 0.0
+        self._apply_body_controls({"antenna": "heart", "eyes": "up", "eyebrow": "love", "emoji": "💛", "left_arm": "cheer", "right_arm": "wave"})
+        self.show_bubble("EVAAA! 💛", 6500, source="tool" if force else "static")
+        if self.cfg.ai_reactions_enabled and not self._thread_running(self.reaction_worker) and time.time() - self._last_eva_event_llm_at > 8:
+            self._last_eva_event_llm_at = time.time()
+            self._pending_activity_note = {"kind": "eva_flyby", "eva": self.debris_overlay.eva_status(), "tone_choices": ["lovestruck", "excited", "funny", "dramatic"], "hint": "Wally is sprinting behind EVA and calling her name."}
+            self.request_ai_reaction("eva_flyby_lovestruck_chase", use_vision=False)
+        # If the overlay ends naturally, trigger the heartbreak routine.
+        QTimer.singleShot(19000, self._check_eva_flyby_finished)
+
+    def _check_eva_flyby_finished(self) -> None:
+        if self.current_action == "chase_eva" and not self.debris_overlay.eva_visible and time.time() > self._eva_sad_until:
+            self._start_eva_miss_mood()
+
+    def _start_eva_miss_mood(self) -> None:
+        if getattr(self, "_eva_miss_started", False):
+            return
+        self._eva_miss_started = True
+        self._eva_chase_lock_until = 0.0
+        self._eva_sad_until = time.time() + random.uniform(4.0, 10.0)
+        self._eva_recovery_until = time.time() + 120.0
+        self.current_action = "pause"
+        self.target_point = None
+        self.pause_until = self._eva_sad_until
+        self.set_expression("soft")
+        self._nudge_mood(cozy=-4, excited=-5, playful=-4, anxious=3, frustrated=5, curious=2)
+        self._apply_body_controls({"antenna": "droop", "eyes": "side", "eyebrow": "sad", "emoji": "💛", "left_arm": "shy", "right_arm": "shy"})
+        self._remember_event("eva_flyby_missed", text="EVA gone", data={"did": "feel_bad_after_eva", "sad_seconds": round(self._eva_sad_until - time.time(), 1)})
+        if not self.bubble_text:
+            self.show_bubble(random.choice(["EVA gone...", "Tiny heart dent.", "She flew away."]), 6500, source="static")
+        if self.cfg.ai_reactions_enabled and not self._thread_running(self.reaction_worker) and time.time() - self._last_eva_event_llm_at > 8:
+            self._last_eva_event_llm_at = time.time()
+            self._pending_activity_note = {"kind": "eva_left_wally_sad", "tone_choices": ["soft", "dramatic", "funny", "heartbroken"], "hint": "Wally missed EVA and is sad for a few seconds."}
+            self.request_ai_reaction("eva_left_wally_sad", use_vision=False)
+        QTimer.singleShot(int((self._eva_sad_until - time.time()) * 1000 + 200), self._eva_angry_ball_kick)
+
+    def _eva_angry_ball_kick(self) -> None:
+        if time.time() < self._eva_sad_until - 0.2:
+            return
+        self._remember_event("eva_sad_angry_ball_kick", text="sad kick", data={"did": "kick_ball_after_eva"})
+        self.set_expression("frustrated")
+        self._apply_body_controls({"antenna": "wiggle", "eyes": "basketball", "eyebrow": "frustrated", "emoji": "🏀", "left_arm": "cheer", "right_arm": "point"})
+        self.current_action = "kick_ball"
+        self._pending_ball_kick_reason = "eva_sad_angry_kick"
+        self.target_point = self._ball_target_point()
+        if self.target_point is None:
+            self._perform_ball_kick("eva_sad_angry_kick")
+
     def _schedule_next_butterfly(self) -> None:
         if not hasattr(self, "butterfly_timer"):
             return
@@ -5080,9 +5403,10 @@ class PetWindow(QWidget):
             self.show_bubble(random.choice(["Tiny wings incoming 🦋", "Ohhh, sky raisin!", "Flutter visitor spotted!", "That bug has confidence."]), 7600, source="static")
 
         # User clarified: this is a true per-arrival 40% chance, not "only on the 4th".
-        critical_busy = self.current_action in {"clean", "go_bin", "parachute", "fall", "listen", "talk_to_user"} and self.target_point is not None
+        critical_busy = self.current_action in {"clean", "go_bin", "chase_eva", "parachute", "fall", "listen", "talk_to_user"} and self.target_point is not None
         chase_roll = random.random()
-        should_chase = bool(force or ((not critical_busy) and chase_roll < 0.40))
+        eva_recovery = time.time() < getattr(self, "_eva_recovery_until", 0.0)
+        should_chase = bool(force or (eva_recovery and not critical_busy) or ((not critical_busy) and chase_roll < 0.40))
         if should_chase:
             self._butterfly_arrival_chases = int(getattr(self, "_butterfly_arrival_chases", 0)) + 1
             self._save_current_goal_for_butterfly_interrupt()
@@ -5092,6 +5416,7 @@ class PetWindow(QWidget):
                 "roll": round(chase_roll, 3),
                 "arrival_chases": self._butterfly_arrival_chases,
                 "arrival_seen": self._butterfly_arrival_seen,
+                "eva_recovery": bool(time.time() < getattr(self, "_eva_recovery_until", 0.0)),
             })
             self._apply_reaction_action("chase_butterfly", 2, "butterfly")
         else:
@@ -5183,11 +5508,21 @@ class PetWindow(QWidget):
         target_norm = target.strip().lower().replace(" ", "_")
         physical_actions = {
             "clean", "collect", "go_bin", "dump", "watch_tv", "play_tv", "playtv",
-            "chase_butterfly", "chase", "inspect_mouse", "mouse", "scoot_left",
+            "chase_butterfly", "chase_eva", "chase", "inspect_mouse", "mouse", "scoot_left",
             "scoot_right", "dance", "throw_trash", "toss_debris", "throw", "move_to",
             "move", "hide", "roam", "sing", "kick_ball", "kick", "ball"
         }
-        moving_active = self.current_action in {"clean", "go_bin", "chase_butterfly", "watch_tv", "move_to", "kick_ball", "inspect_mouse", "kick_ball"} and self.target_point is not None
+        moving_active = self.current_action in {"clean", "go_bin", "chase_butterfly", "chase_eva", "watch_tv", "move_to", "kick_ball", "inspect_mouse", "kick_ball"} and self.target_point is not None
+
+        # EVA is a high-priority drama event. LLM may comment/body-react, but cannot redirect while she is on screen.
+        if self.current_action == "chase_eva" and self.debris_overlay.eva_visible:
+            if action_norm not in {"chase_eva", "none", "", "chill", "pause"}:
+                action = "none"
+                action_norm = "none"
+                target = "eva"
+                target_norm = "eva"
+                queue_choice = "keep"
+                override = False
 
         # Ground speech to actual state. Inner thoughts are not real third-party events.
         bubble_l = bubble.lower()
@@ -5517,7 +5852,7 @@ class PetWindow(QWidget):
         action_alias = {
             "collect": "clean", "pickup": "clean", "pick_up": "clean", "sweep": "clean",
             "dump": "go_bin", "bin": "go_bin", "tv": "watch_tv", "playtv": "play_tv",
-            "chase": "chase_butterfly", "mouse": "inspect_mouse", "throw": "throw_trash", "kick": "kick_ball", "ball": "kick_ball", "basketball": "kick_ball",
+            "chase": "chase_butterfly", "eva": "chase_eva", "evaaa": "chase_eva", "mouse": "inspect_mouse", "throw": "throw_trash", "kick": "kick_ball", "ball": "kick_ball", "basketball": "kick_ball",
             "toss": "throw_trash", "move": "move_to", "idle": "chill", "wander": "roam",
             "patrol": "roam", "song": "sing", "hum": "sing",
         }
@@ -5530,7 +5865,7 @@ class PetWindow(QWidget):
         }
         action = action_alias.get(action, action)
         target = target_alias.get(target, target)
-        physical_action_names = {"clean", "go_bin", "watch_tv", "play_tv", "chase_butterfly", "kick_ball", "inspect_mouse", "scoot_left", "scoot_right", "roam", "hide", "dance", "sing", "move_to", "toss_debris", "throw_trash"}
+        physical_action_names = {"clean", "go_bin", "watch_tv", "play_tv", "chase_butterfly", "chase_eva", "kick_ball", "inspect_mouse", "scoot_left", "scoot_right", "roam", "hide", "dance", "sing", "move_to", "toss_debris", "throw_trash"}
         if action in physical_action_names:
             self._last_physical_action_at = time.time()
             self._next_playful_nudge_at = time.time() + random.uniform(16, 30)
@@ -5572,6 +5907,13 @@ class PetWindow(QWidget):
                 self.debris_overlay.ball.y = max(20, self.debris_overlay.height() - 17)
                 point = self._ball_target_point()
             self.target_point = point or self._target_point_for_llm("random")
+        elif action == "chase_eva":
+            if not self.debris_overlay.eva_visible:
+                self.debris_overlay.summon_eva_flyby()
+            self.current_action = "chase_eva"
+            self.set_expression("love")
+            self._apply_body_controls({"antenna": "heart", "eyes": "up", "eyebrow": "love", "emoji": "💛", "left_arm": "cheer", "right_arm": "wave"})
+            self.target_point = self._eva_target_point()
         elif action == "chase_butterfly":
             if not self.debris_overlay.butterfly_visible:
                 if not allow_butterfly_spawn:
@@ -5783,7 +6125,7 @@ class PetWindow(QWidget):
                 "last_error": self.last_ai_error[:160],
             },
             "available_places": ["taskbar_edge", "trash_bin_right", "tv_sofa_left", "tiny_tree", "nearest_debris", "debris_pile", "butterfly", "basketball", "mouse", "left_edge", "right_edge"],
-            "available_actions": ["chill", "pause", "inspect", "collect", "clean", "go_bin", "watch_tv", "play_tv", "chase_butterfly", "kick_ball", "inspect_mouse", "scoot_left", "scoot_right", "dance", "hide", "nap", "toss_debris", "move_to", "watch", "none"],
+            "available_actions": ["chill", "pause", "inspect", "collect", "clean", "go_bin", "watch_tv", "play_tv", "chase_butterfly", "chase_eva", "kick_ball", "inspect_mouse", "scoot_left", "scoot_right", "dance", "hide", "nap", "toss_debris", "move_to", "watch", "none"],
             "available_body_controls": {
                 "antenna": ["relaxed", "perked", "droop", "wiggle", "heart"],
                 "eyes": ["current", "mouse", "butterfly", "debris", "trash_bin", "tv", "screen", "user", "sleepy", "sparkle"],
@@ -5891,6 +6233,15 @@ class PetWindow(QWidget):
     def _tv_target_point(self) -> QPoint:
         point = self.debris_overlay.tv_spot_global()
         return self._clamp_to_lane(QPoint(point.x() - self.width() // 2, self.y()))
+
+    def _eva_target_point(self) -> Optional[QPoint]:
+        point = self.debris_overlay.eva_point_global() if hasattr(self.debris_overlay, "eva_point_global") else None
+        if point is None:
+            return None
+        # Follow beneath and slightly behind EVA, not directly on top of her.
+        evx = float(getattr(self.debris_overlay, "eva_vx", 1.0))
+        behind = 52 if evx > 0 else -52
+        return self._clamp_to_lane(QPoint(point.x() - self.width() // 2 - behind, self.y()))
 
     def _butterfly_target_point(self) -> Optional[QPoint]:
         point = self.debris_overlay.butterfly_point_global()
