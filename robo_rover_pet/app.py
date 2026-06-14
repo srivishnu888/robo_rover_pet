@@ -6,10 +6,13 @@ import math
 import os
 import random
 import re
+import struct
 import subprocess
 import sys
+import tempfile
 import threading
 import time
+import wave
 from datetime import datetime, timedelta
 from dataclasses import dataclass
 from pathlib import Path
@@ -27,6 +30,7 @@ from PySide6.QtCore import (
     QThread,
     QTimer,
     Qt,
+    QUrl,
     Signal,
 )
 from PySide6.QtGui import (
@@ -44,6 +48,7 @@ from PySide6.QtGui import (
     QPixmap,
     QRadialGradient,
 )
+from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -388,7 +393,7 @@ class SettingsDialog(QDialog):
         self.thinking_checkbox = QCheckBox("Enable thinking traces (OFF by default; slower)")
         self.thinking_checkbox.setChecked(cfg.thinking_enabled)
 
-        self.tts_checkbox = QCheckBox("Speak replies aloud when pyttsx3 is installed")
+        self.tts_checkbox = QCheckBox("Enable cute robot voice sounds (pyttsx3 fallback)")
         self.tts_checkbox.setChecked(cfg.tts_enabled)
 
         self.top_checkbox = QCheckBox("Keep pet always on top")
@@ -3554,6 +3559,291 @@ class PetWindow(QWidget):
             self.reminder_parse_worker = None
         super().closeEvent(event)
 
+    def _robot_voice_profile(self, text: str) -> str:
+        lower = (text or "").lower()
+        expression = str(getattr(self, "expression", "") or "").lower()
+        if "reminder" in lower:
+            return "reminder"
+        if expression == "love" or any(token in lower for token in ("eva", "love", "heart", "miss")):
+            return "love"
+        if expression in {"excited", "proud"} or "!" in lower:
+            return "excited"
+        if expression in {"angry", "irritated", "frustrated"}:
+            return "angry"
+        if expression in {"soft", "sleepy"} or any(token in lower for token in ("gone", "sad", "sorry", "sleep")):
+            return "sad"
+        if expression in {"curious", "thinking", "watching"} or "?" in lower:
+            return "curious"
+        return "happy"
+
+    def _sound_asset_path(self, name: str) -> Path:
+        filename = name if name.lower().endswith((".wav", ".mp3")) else f"{name}.wav"
+        return Path(__file__).resolve().parent / "assets" / "sounds" / filename
+
+    def _sound_profile_candidates(self) -> Dict[str, List[str]]:
+        return {
+            "happy": ["walle_walle_01.wav", "walle_chirp_03_1.wav"],
+            "love": ["walle_chirp_07_1.wav", "walle_walle_01.wav"],
+            "excited": ["walle_chirp_07_1.wav", "walle_chirp_04_1.wav", "walle_chirp_03_1.wav"],
+            "angry": ["walle_stun_01.wav", "walle_stun_02.wav", "walle_stun_03.wav"],
+            "sad": ["walle_sigh_01.wav"],
+            "curious": ["walle_chirp_04_1.wav", "walle_chirp_05_1.wav", "walle_chirp_03_1.wav"],
+            "reminder": ["walle_chirp_05_1.wav", "walle_stun_02.wav", "walle_stun_01.wav", "walle_stun_03.wav"],
+            "dizzy": ["walle_stun_03.wav", "walle_stun_01.wav", "walle_stun_02.wav"],
+            "sleepy": ["walle_sigh_01.wav"],
+            "alert": ["walle_stun_02.wav", "walle_stun_01.wav", "walle_stun_03.wav", "walle_chirp_05_1.wav"],
+            "giggle": ["walle_chirp_03_1.wav", "walle_chirp_07_1.wav"],
+            "play": ["walle_walle_01.wav", "walle_chirp_07_1.wav"],
+            "eva_flyby": ["walle_eve_01.wav"],
+        }
+
+    def _randomized_volume(self, base_volume: float = 1.0, variation: float = 0.10) -> float:
+        low = max(0.0, 1.0 - max(0.0, variation))
+        high = 1.0 + max(0.0, variation)
+        return max(0.0, min(1.0, base_volume * random.uniform(low, high)))
+
+    def _can_play_sound(self, name: str, cooldown_seconds: float = 30.0, avoid_recent: bool = True) -> bool:
+        now = time.time()
+        recent_name = str(getattr(self, "_last_sound_played_name", ""))
+        last_played = dict(getattr(self, "_sound_last_played_at", {}))
+        if avoid_recent and name == recent_name:
+            return False
+        if now - float(last_played.get(name, 0.0)) < cooldown_seconds:
+            return False
+        return True
+
+    def _mark_sound_played(self, name: str) -> None:
+        sound_state = dict(getattr(self, "_sound_last_played_at", {}))
+        sound_state[name] = time.time()
+        self._sound_last_played_at = sound_state
+        self._last_sound_played_name = name
+
+    def _choose_sound_from_candidates(self, candidates: List[str], cooldown_seconds: float = 30.0, avoid_recent: bool = True) -> Optional[str]:
+        if not candidates:
+            return None
+        now = time.time()
+        recent_name = str(getattr(self, "_last_sound_played_name", ""))
+        last_played = dict(getattr(self, "_sound_last_played_at", {}))
+        eligible = [
+            name
+            for name in candidates
+            if (not avoid_recent or name != recent_name) and now - float(last_played.get(name, 0.0)) >= cooldown_seconds
+        ]
+        if not eligible:
+            return None
+        eligible.sort(key=lambda name: float(last_played.get(name, 0.0)))
+        oldest_at = float(last_played.get(eligible[0], 0.0))
+        oldest = [name for name in eligible if float(last_played.get(name, 0.0)) == oldest_at]
+        return random.choice(oldest)
+
+    def _choose_sound_for_profile(self, profile: str) -> Optional[str]:
+        sound_sets = self._sound_profile_candidates()
+        candidates = list(sound_sets.get(profile, sound_sets["happy"]))
+        return self._choose_sound_from_candidates(candidates, cooldown_seconds=30.0, avoid_recent=True)
+
+    def _play_randomized_wav(self, path: Path) -> None:
+        import winsound
+
+        scale = random.uniform(0.90, 1.10)
+        temp_path = Path(tempfile.gettempdir()) / f"robo_rover_pet_{time.time_ns()}_{path.name}"
+        try:
+            with wave.open(str(path), "rb") as reader:
+                params = reader.getparams()
+                frames = reader.readframes(reader.getnframes())
+
+            sampwidth = params.sampwidth
+            if sampwidth == 1:
+                adjusted = bytearray()
+                for sample in frames:
+                    centered = sample - 128
+                    scaled = max(-128, min(127, int(centered * scale)))
+                    adjusted.append(scaled + 128)
+                out = bytes(adjusted)
+            elif sampwidth == 2:
+                count = len(frames) // 2
+                samples = struct.unpack("<" + "h" * count, frames)
+                scaled = [max(-32768, min(32767, int(sample * scale))) for sample in samples]
+                out = struct.pack("<" + "h" * count, *scaled)
+            elif sampwidth == 4:
+                count = len(frames) // 4
+                samples = struct.unpack("<" + "i" * count, frames)
+                scaled = [max(-2147483648, min(2147483647, int(sample * scale))) for sample in samples]
+                out = struct.pack("<" + "i" * count, *scaled)
+            else:
+                winsound.PlaySound(str(path), winsound.SND_FILENAME)
+                return
+
+            with wave.open(str(temp_path), "wb") as writer:
+                writer.setparams(params)
+                writer.writeframes(out)
+
+            winsound.PlaySound(str(temp_path), winsound.SND_FILENAME)
+        finally:
+            try:
+                if temp_path.exists():
+                    temp_path.unlink()
+            except Exception:
+                pass
+
+    def _play_named_sound(self, name: str, cooldown_seconds: float = 30.0, avoid_recent: bool = True, skip_if_blocked: bool = False) -> bool:
+        path = self._sound_asset_path(name)
+        if not path.exists():
+            raise FileNotFoundError(str(path))
+        if not self._can_play_sound(name, cooldown_seconds=cooldown_seconds, avoid_recent=avoid_recent):
+            if skip_if_blocked:
+                return False
+            raise RuntimeError(f"sound blocked by cooldown: {name}")
+        self._mark_sound_played(name)
+        self._play_randomized_wav(path)
+        return True
+
+    def _release_media_sound_ref(self, player: QMediaPlayer, audio: QAudioOutput) -> None:
+        refs = [
+            pair
+            for pair in list(getattr(self, "_media_sound_refs", []))
+            if pair[0] is not player and pair[1] is not audio
+        ]
+        self._media_sound_refs = refs
+        try:
+            player.stop()
+        except Exception:
+            pass
+        player.deleteLater()
+        audio.deleteLater()
+
+    def _play_quiet_media_sound(self, name: str, volume: float = 0.10, cooldown_seconds: float = 30.0, variation: float = 0.10) -> None:
+        path = self._sound_asset_path(name)
+        if not path.exists():
+            raise FileNotFoundError(str(path))
+        if not self._can_play_sound(name, cooldown_seconds=cooldown_seconds, avoid_recent=True):
+            return
+        self._mark_sound_played(name)
+
+        audio = QAudioOutput(self)
+        audio.setVolume(self._randomized_volume(volume, variation))
+        player = QMediaPlayer(self)
+        player.setAudioOutput(audio)
+        player.setSource(QUrl.fromLocalFile(str(path)))
+        refs = list(getattr(self, "_media_sound_refs", []))
+        refs.append((player, audio))
+        self._media_sound_refs = refs
+        player.play()
+        QTimer.singleShot(7000, lambda p=player, a=audio: self._release_media_sound_ref(p, a))
+
+    def _play_soft_voice_variant_sound(self, name: str) -> None:
+        try:
+            self._play_quiet_media_sound(name, volume=random.uniform(0.05, 0.08), cooldown_seconds=30.0, variation=0.0)
+        except Exception:
+            return
+
+    def _play_tantrum_garbage_sound(self) -> None:
+        try:
+            self._play_quiet_media_sound("too much garbage.MP3", volume=0.10, cooldown_seconds=30.0)
+        except Exception:
+            return
+
+    def _play_whoa_sound(self) -> None:
+        try:
+            self._play_quiet_media_sound("whoa.MP3", volume=0.10, cooldown_seconds=30.0)
+        except Exception:
+            return
+
+    def _play_robot_voice(self, text: str) -> None:
+        profile = self._robot_voice_profile(text)
+        voice_candidates = {
+            "happy": ["walle_vocal_basic_01.wav", "wall-e2.MP3"],
+            "play": ["walle_vocal_basic_01.wav", "wall-e2.MP3"],
+        }
+        if profile in voice_candidates:
+            choice = self._choose_sound_from_candidates(voice_candidates[profile], cooldown_seconds=30.0, avoid_recent=True)
+            if choice is not None:
+                self._play_soft_voice_variant_sound(choice)
+                return
+        choice = self._choose_sound_for_profile(profile)
+        if choice is not None:
+            self._play_named_sound(choice)
+
+    def _emoji_sound_profile(self, effect: str) -> Optional[str]:
+        token = (effect or "").strip().lower()
+        if token in {"none", ""}:
+            return None
+        if token in {"heart", "💛", "🫡", "love"}:
+            return "love"
+        if token in {"sparkle", "✨", "🌟", "butterfly", "🦋", "music", "🎵", "🎶"}:
+            return "excited"
+        if token in {"dizzy", "💫", "😵‍💫"}:
+            return "dizzy"
+        if token in {"sleep", "😴", "💤"}:
+            return "sleepy"
+        if token in {"question", "?", "👀", "🔍"}:
+            return "curious"
+        if token in {"exclamation", "!", "😳", "⚡"}:
+            return "alert"
+        if token in {"😂", "🤭", "🙃"}:
+            return "giggle"
+        if token in {"🥹", "💧"}:
+            return "sad"
+        if token in {"🏀", "ball", "basketball"}:
+            return "play"
+        return "happy"
+
+    def _play_robot_emoji_sound(self, effect: str) -> None:
+        profile = self._emoji_sound_profile(effect)
+        if profile is None:
+            return
+        choice = self._choose_sound_for_profile(profile)
+        if choice is not None:
+            self._play_named_sound(choice)
+
+    def _maybe_play_emoji_sound(self, effect: str) -> None:
+        if not self.store.config().tts_enabled:
+            return
+        if not sys.platform.startswith("win"):
+            return
+        profile = self._emoji_sound_profile(effect)
+        if profile is None:
+            return
+
+        now = time.time()
+        last_effect = getattr(self, "_last_emoji_sound_effect", "")
+        last_at = float(getattr(self, "_last_emoji_sound_at", 0.0))
+        cooldown = 1.1 if profile in {"giggle", "alert", "excited"} else 1.7
+        if effect == last_effect and now - last_at < cooldown:
+            return
+        if now - last_at < 0.45:
+            return
+
+        self._last_emoji_sound_effect = effect
+        self._last_emoji_sound_at = now
+
+        def run_sound() -> None:
+            try:
+                self._play_robot_emoji_sound(effect)
+            except Exception:
+                return
+
+        threading.Thread(target=run_sound, daemon=True).start()
+
+    def _play_eva_flyby_sound(self, token: int) -> None:
+        if not self.store.config().tts_enabled:
+            return
+        if not sys.platform.startswith("win"):
+            return
+        if token != int(getattr(self, "_eva_sound_token", 0)):
+            return
+        if not getattr(self.debris_overlay, "eva_visible", False):
+            return
+
+        def run_sound() -> None:
+            try:
+                self._play_named_sound("walle_eve_01.wav", cooldown_seconds=2.0, avoid_recent=False, skip_if_blocked=True)
+            except Exception:
+                return
+
+        threading.Thread(target=run_sound, daemon=True).start()
+        if token == int(getattr(self, "_eva_sound_token", 0)) and getattr(self.debris_overlay, "eva_visible", False):
+            QTimer.singleShot(random.randint(2000, 3000), lambda active_token=token: self._play_eva_flyby_sound(active_token))
+
     def _speak(self, text: str) -> None:
         if not self.store.config().tts_enabled:
             return
@@ -3562,11 +3852,17 @@ class PetWindow(QWidget):
         clean = clean[:700]
 
         def run_tts() -> None:
+            if sys.platform.startswith("win"):
+                try:
+                    self._play_robot_voice(clean)
+                    return
+                except Exception:
+                    pass
             try:
                 import pyttsx3  # type: ignore
 
                 engine = pyttsx3.init()
-                engine.setProperty("rate", 180)
+                engine.setProperty("rate", 195)
                 engine.say(clean)
                 engine.runAndWait()
             except Exception:
@@ -3884,6 +4180,7 @@ class PetWindow(QWidget):
             style=style,
             super_kick=super_kick,
         )
+        self._play_whoa_sound()
         self.set_expression("excited")
         self._apply_body_controls({"antenna": "wiggle", "eyes": "basketball", "eyebrow": "mischief", "emoji": random.choice(["🏀", "⚡", "😎", "🤭"]), "left_arm": "cheer", "right_arm": "point"})
         self.current_action = "pause"
@@ -4188,6 +4485,7 @@ class PetWindow(QWidget):
         self.pause_until = now + 3.2
         self.set_expression("angry")
         self._apply_body_controls({"antenna": "wiggle", "eyes": "debris", "eyebrow": "angry", "emoji": random.choice(["⚡", "💢", "😤", "🗑️"]), "left_arm": "cheer", "right_arm": "point"})
+        self._play_tantrum_garbage_sound()
         if self.cfg.ai_reactions_enabled and not self._thread_running(self.reaction_worker):
             self.request_ai_reaction("tiny_cleaner_tantrum_mess_overload", force=True, use_vision=False)
         return True
@@ -4820,6 +5118,7 @@ class PetWindow(QWidget):
             self.pause_until = now + 7.0
             self.set_expression("angry")
             self._apply_body_controls({"antenna": "wiggle", "eyes": "user", "eyebrow": "angry", "emoji": "🗑️", "left_arm": "tired", "right_arm": "point"})
+            self._play_tantrum_garbage_sound()
             self._nudge_mood(irritated=18, frustrated=14, anxious=6, playful=-8, cozy=-5)
             event = {
                 "kind": "hard_work_trash_overload",
@@ -5320,6 +5619,9 @@ class PetWindow(QWidget):
         if self.debris_overlay.eva_visible and not force:
             return
         self.debris_overlay.summon_eva_flyby()
+        self._eva_sound_token = int(getattr(self, "_eva_sound_token", 0)) + 1
+        eva_sound_delay_ms = random.randint(2000, 3000)
+        QTimer.singleShot(eva_sound_delay_ms, lambda token=self._eva_sound_token: self._play_eva_flyby_sound(token))
         self._eva_flyby_seen += 1
         self._eva_sad_until = 0.0
         self._eva_miss_started = False
@@ -5922,6 +6224,7 @@ class PetWindow(QWidget):
                     return
                 self.debris_overlay.summon_butterfly()
             self.current_action = "chase_butterfly"
+            self._play_whoa_sound()
             self.set_expression("excited")
             self._apply_body_controls({"antenna": "wiggle", "eyes": "butterfly", "eyebrow": "curious", "emoji": "butterfly", "left_arm": "point", "right_arm": "cheer"})
             self.target_point = self._butterfly_target_point()
@@ -6975,6 +7278,7 @@ class PetWindow(QWidget):
                 p.drawArc(QRectF(cx, cy, 18, 14), int(self.float_phase * 120) * 16, 290 * 16)
 
         if time.time() < self.emoji_until and self.emoji_effect != "none":
+            self._maybe_play_emoji_sound(self.emoji_effect)
             self._draw_emoji_effect(p, self.emoji_effect)
         p.restore()
 

@@ -8,6 +8,7 @@ Inside the app, the rover's in-character persona is `Wally`.
 
 - Runs as a floating autonomous desktop pet with tray icon support.
 - Uses a local Ollama model for short in-character comments and reactions.
+- Uses built-in cute robot voice sounds on Windows for expressive chirps, pseudo-speech, and emotional reactions.
 - Reacts to typing, scrolling, mouse movement, workload pressure, and optional screenshot summaries.
 - Tries to relieve stress by interrupting work with playful reactions and break nudges.
 - Supports quick local reminders and reminder alerts.
@@ -49,7 +50,7 @@ Runtime dependencies from [requirements.txt](requirements.txt):
 
 Optional:
 
-- `pyttsx3` for spoken pet replies
+- `pyttsx3` as a fallback spoken voice backend
 
 Build dependency from [requirements-build.txt](requirements-build.txt):
 
