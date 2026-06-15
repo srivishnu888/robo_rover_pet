@@ -350,7 +350,7 @@ class SettingsStore:
             pet_scale_percent=max(25, min(100, self.integer("pet/scale_percent", DEFAULT_SCALE_PERCENT))),
             reaction_min_minutes=min_minutes,
             reaction_max_minutes=max_minutes,
-            speech_max_words=max(4, min(24, self.integer("pet/speech_max_words", 9))),
+            speech_max_words=max(4, min(24, self.integer("pet/speech_max_words", 12))),
             work_trash_enabled=self.boolean("pet/work_trash_enabled", True),
             eva_speed_percent=max(100, min(400, self.integer("pet/eva_speed_percent", 250))),
             eva_duration_seconds=max(10, min(90, self.integer("pet/eva_duration_seconds", 38))),
@@ -4853,6 +4853,58 @@ class PetWindow(QWidget):
             self._last_action_name_for_mood = self.current_action
             self._same_action_streak = 0
 
+        # Make the emotion rollercoaster *visible*: let whichever mood is currently
+        # spiking above its baseline drive the face, so Wally actually looks excited,
+        # frustrated, bored, proud, etc. instead of sitting on one default look.
+        self._apply_mood_to_face(baselines)
+
+    # Mood meter (deviation above baseline) -> visible expression + brow.
+    _MOOD_FACE_MAP = {
+        "frustrated": ("frustrated", "frustrated"),
+        "irritated": ("irritated", "irritated"),
+        "anxious": ("scared", "worried"),
+        "excited": ("excited", "happy"),
+        "proud": ("proud", "proud"),
+        "cozy": ("soft", "soft"),
+        "bored": ("sleepy", "flat"),
+        "curious": ("curious", "curious"),
+        "playful": ("happy", "happy"),
+        "naughty": ("happy", "mischief"),
+        "sarcastic": ("thinking", "raised"),
+        "encouraging": ("happy", "happy"),
+    }
+
+    def _apply_mood_to_face(self, baselines: Dict[str, float]) -> None:
+        # Don't fight an action that already owns the face, a fresh LLM/user line, or
+        # special states (dizzy, dragging, EVA, naps); those are stronger signals.
+        now = time.time()
+        if self.is_dragging or now < self.dizzy_until:
+            return
+        if now < float(getattr(self, "_eva_sad_until", 0.0)):
+            return  # protect the scripted heartbreak look
+        if self.current_action not in {"chill", "pause", "roam", "idle", "nap", "none", ""}:
+            return
+        if now - float(getattr(self, "_last_llm_expression_at", 0.0)) < 7.0:
+            return
+        if now - float(getattr(self, "_last_mood_face_at", 0.0)) < 1.6:
+            return
+
+        # Pick the mood that deviates most from its baseline = what's spiking now.
+        best_key, best_dev = "", 0.0
+        for key, base in baselines.items():
+            dev = self.moods.get(key, base) - base
+            if dev > best_dev:
+                best_key, best_dev = key, dev
+        # Needs a real spike to override the neutral curious look.
+        if best_dev < 7.0 or best_key not in self._MOOD_FACE_MAP:
+            return
+        expression, brow = self._MOOD_FACE_MAP[best_key]
+        if expression != self.expression:
+            self.expression = expression
+            self.eyebrow_pose = brow
+            self._last_mood_face_at = now
+            self.update()
+
     def _maybe_ocd_cleaning(self, debris_count: int, active_moving: bool) -> bool:
         if not self.cfg.debris_enabled or debris_count <= 0 or active_moving or self.is_dragging:
             return False
@@ -5692,14 +5744,7 @@ class PetWindow(QWidget):
             and not self._thread_running(self.reaction_worker)
             and now - self.last_ai_request_at > 3.5
         )
-        if self._should_react_to_activity_event(event_kind, can_call):
-            self._event_reaction_used += 1
-            self.request_ai_reaction(f"event_{event_kind}", use_vision=use_vision)
-            return
 
-        # Instant witty reflex for events that did NOT go to the LLM. Always fires when
-        # offline (the brain is silent anyway); when online it fires only occasionally
-        # and rate-limited, so Wally feels responsive without talking over himself.
         situation_map = {
             "window_changed": "window_hopping",
             "scrolling": "screen",
@@ -5712,8 +5757,16 @@ class PetWindow(QWidget):
         else:
             situation = situation_map.get(event_kind, "ambient")
 
+        going_to_llm = self._should_react_to_activity_event(event_kind, can_call)
+
+        # Two-beat reaction: an instant in-character static opener for immediate feedback,
+        # then (when chosen) the LLM follows with a fresh, dynamic, witty line that
+        # *upgrades* the static bubble (ollama > static in show_bubble priority). The
+        # static line is only the opener, never the whole personality.
         last_quip = float(getattr(self, "_last_instant_quip_at", 0.0))
-        if self.ai_online:
+        if going_to_llm:
+            should_quip = now - last_quip > 6.0          # opener before the dynamic line
+        elif self.ai_online:
             should_quip = (now - last_quip > 18.0) and random.random() < 0.22
         else:
             should_quip = now - last_quip > 9.0
@@ -5723,6 +5776,10 @@ class PetWindow(QWidget):
                 self.show_bubble(line, 6500, source="static")
                 self._remember_pet_line(line)
                 self._last_instant_quip_at = now
+
+        if going_to_llm:
+            self._event_reaction_used += 1
+            self.request_ai_reaction(f"event_{event_kind}", use_vision=use_vision)
 
     def _local_time_context(self) -> Dict[str, object]:
         now_dt = datetime.now()
@@ -5978,6 +6035,22 @@ class PetWindow(QWidget):
             "speech_expectation": f"Usually include b as a complete sentence under {self.cfg.speech_max_words} words unless silence is clearly better. Do not rely on truncation.",
             "need": "Be grounded and alive. Inner thoughts are private prompts, not events. If mentioning an object, act on it. Use workload/trash/break meaning as character, not as scripted text. JSON only.",
         }
+        # On ambient/idle ticks, hand the brain a concrete creative job so the inner
+        # thoughts actually turn into a hummed tune, a joke, a tiny fact, a tease, or a
+        # hype-up — instead of another flat status line. This is what makes the
+        # 15-30s background ticks feel dynamic and alive.
+        if any(tag in reason for tag in ("ambient", "scheduled", "startup", "joke", "fact", "caught_up")):
+            ctx["creative_intent"] = random.choice([
+                {"do": "sing", "how": "hum a short silly made-up tune about the current window, mess, or moment", "set_action": "sing"},
+                {"do": "joke", "how": "one tiny original pun or joke about what's happening right now"},
+                {"do": "fact", "how": "one surprising tiny fact, then a cheeky aside"},
+                {"do": "tease", "how": "playfully roast the user's current activity, with love"},
+                {"do": "observe", "how": "a sly, specific, witty observation about the screen or mess"},
+                {"do": "hype", "how": "a short dramatic hype-up line for whatever they're doing"},
+                {"do": "wonder", "how": "a tiny absurd existential thought, robot-flavored"},
+                {"do": "callback", "how": "reference something from recent memory/chat in a funny way"},
+                {"do": "quiet", "how": "maybe just a tiny chirp or stay silent if nothing is worth saying"},
+            ])
         if include_screenshot:
             summary = self._screen_summary()
             signature = f"{summary.get('tone','?')}|{summary.get('brightness','?')}|{summary.get('dark_ratio','?')}|{summary.get('motion_delta','?')}|{title[:55]}"
@@ -6352,6 +6425,8 @@ class PetWindow(QWidget):
                     if key in mood_nudge:
                         self._nudge_mood(**{key: 4.0})
         self.set_expression(expression)
+        # The LLM's chosen emotion holds the face briefly before mood drift takes over.
+        self._last_llm_expression_at = time.time()
 
         if bubble:
             self.show_bubble(bubble, 7800 + intensity * 800, source="ollama")

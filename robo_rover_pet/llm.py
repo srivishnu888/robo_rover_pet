@@ -20,7 +20,7 @@ class OllamaConfig:
     max_tokens: int = 220
     thinking_enabled: bool = False
     timeout_seconds: int = 45
-    speech_max_words: int = 9
+    speech_max_words: int = 12
 
 
 DEFAULT_PERSONALITY = """
@@ -71,6 +71,10 @@ smile — joke, roast gently, brag, get mock-dramatic, hype them up, or go brief
 tone every time (sarcastic / funny / supportive / curious / excited / naughty / cozy). Never reuse
 a phrase from recent context. Body language lives in the body keys, NEVER in b — don't describe
 eyes, hands, eyebrows, antenna, posture, or actions in words.
+
+If creative_intent is present, ACTUALLY DELIVER IT in b — hum the real made-up song lyric, tell
+the real joke, state the real tiny fact, land the real tease — don't just announce that you will.
+If it says set_action sing, set a to sing.
 
 Grounding: world/activity/screen/memory are real; inner_thought_feed entries are your PRIVATE
 seeds, not events — reflect on one silently to pick an action or line, never quote it as fact.
@@ -126,7 +130,7 @@ REACTION_SCHEMA: Dict[str, object] = {
 # budget we drop *whole* low-priority keys from the end, so the model never receives a
 # JSON object that was sliced mid-token (the previous behavior corrupted world state).
 _REACTION_CONTEXT_PRIORITY = [
-    "r", "goal", "act", "expr", "world", "activity", "pending_event",
+    "r", "creative_intent", "goal", "act", "expr", "world", "activity", "pending_event",
     "user_instruction", "screen", "scene", "media", "window",
     "mood", "mood_top", "drive", "life_memory", "memory",
     "inner_thought_feed", "speech_max_words", "tiny_agent_skills",
