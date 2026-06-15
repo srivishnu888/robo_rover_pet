@@ -69,7 +69,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from . import banter
+from . import banter, companion
 from .llm import DEFAULT_PERSONALITY, OllamaClient, OllamaConfig, OllamaError, compact_pet_sentence
 from .persistence import PetMemoryStore
 
@@ -2622,7 +2622,12 @@ class PetWindow(QWidget):
         self.memory_store = PetMemoryStore(self.store.config_dir)
         self.memory_store.load()
         self.memory_store.mark_session_start()
+        self._day_rhythm = self.memory_store.note_active_day()
+        self._session_started_wall = time.time()
         self._lines_spoken_session = 0
+        self._last_wellbeing_tick_at = 0.0
+        self._last_wellbeing_care_at = 0.0
+        self._last_wellbeing_state = "neutral"
         restored_events = self.memory_store.get_action_memory()
         if restored_events:
             self.action_memory = restored_events[-32:]
@@ -4291,10 +4296,25 @@ class PetWindow(QWidget):
         return keys >= 34 and len(typed) >= 45 and random.random() < 0.18
 
     def _greet_on_launch(self) -> None:
-        line = banter.greeting(self._banter_context(), avoid=self.recent_pet_lines[-10:])
+        ctx = self._banter_context()
+        avoid = self.recent_pet_lines[-10:]
+        rhythm = getattr(self, "_day_rhythm", {}) or {}
+        emoji = random.choice(["✨", "🤩", "🥰", "🎉", "👋"])
+        # Daily-companion flavor: missed-you after a gap, streak pride, or new-day hello.
+        if int(rhythm.get("days_since_last", 0) or 0) >= 2:
+            line = banter.pick("care_missed", ctx, avoid=avoid)
+            emoji = "🥹"
+        elif int(rhythm.get("streak", 0) or 0) >= 3 and random.random() < 0.6:
+            line = banter.streak_line(int(rhythm["streak"]), avoid=avoid)
+            emoji = "🔥"
+        elif rhythm.get("new_day") and random.random() < 0.5:
+            line = banter.pick("daily_hello", ctx, avoid=avoid)
+            emoji = "☀️" if ctx.get("daypart") == "morning" else "👋"
+        else:
+            line = banter.greeting(ctx, avoid=avoid)
         if line:
             self.show_bubble(line, 6500, source="static")
-            self.emoji_effect = random.choice(["✨", "🤩", "🥰", "🎉", "👋"])
+            self.emoji_effect = emoji
             self.emoji_until = time.time() + 6.0
             self._last_spoken_bubble_at = time.time()
             self._remember_pet_line(line)
@@ -4310,6 +4330,8 @@ class PetWindow(QWidget):
         "double_poke": "🤭", "pet": "🥰", "rapid_typing": "⚡", "window_hopping": "👀",
         "idle": "😴", "overwhelmed": "😩", "screen": "👀", "messy": "🧹",
         "bored": "🥱", "playful": "😎", "clean_pride": "🏆", "late_night": "🌙", "morning": "☀️",
+        "care_stressed": "🥺", "care_stuck": "💡", "care_late": "🌙", "care_missed": "🥹",
+        "care_restless": "🎮", "care_celebrate": "🎉", "daily_hello": "☀️",
     }
     _MOOD_EMOJI = {
         "excited": "🤩", "proud": "🏆", "irritated": "😤", "frustrated": "😩",
@@ -4344,6 +4366,57 @@ class PetWindow(QWidget):
         words = line.split()
         if 3 <= len(words) <= 12 and random.random() < 0.22:
             store.add_gag(line)
+
+    def _wellbeing_signals(self) -> Dict[str, object]:
+        monitor = self.activity_monitor
+        return {
+            "work_pressure": round(self.work_pressure, 1),
+            "key_score": round(getattr(monitor, "recent_key_score", 0.0), 1),
+            "idle_seconds": round(max(0.0, time.time() - getattr(monitor, "last_input_time", time.time())), 1),
+            "window_changes": int(getattr(self, "_event_reaction_counters", {}).get("window", 0)),
+            "daypart": self._local_time_context().get("daypart", ""),
+            "session_minutes": round((time.time() - float(getattr(self, "_session_started_wall", time.time()))) / 60.0, 1),
+        }
+
+    def _wellbeing_tick(self) -> None:
+        """Attune to how the user is doing and, occasionally, respond like a friend.
+
+        This is the companion layer: not reacting to an event, but to *the person*.
+        Throttled and probabilistic so it feels caring, never naggy."""
+        now = time.time()
+        if now - self._last_wellbeing_tick_at < 30.0:
+            return
+        self._last_wellbeing_tick_at = now
+        if self.is_dragging or self.current_action in {"clean", "go_bin", "chase_eva", "chase_butterfly", "kick_ball"}:
+            return
+
+        state = companion.read_state(self._wellbeing_signals())
+        self._last_wellbeing_state = state
+        resp = companion.response_for(state)
+        mood = resp.get("mood") or {}
+        if isinstance(mood, dict) and mood:
+            self._nudge_mood(**{k: float(v) for k, v in mood.items()})
+
+        situation = resp.get("situation")
+        if not situation:
+            return
+        # Don't talk over a fresh line, and space caring check-ins generously apart.
+        if self.bubble_text and now < float(getattr(self, "_bubble_protected_until", 0.0)):
+            return
+        if now - self._last_wellbeing_care_at < 150.0:
+            return
+        if random.random() > float(resp.get("speak", 0.0)):
+            return
+        line = banter.pick(str(situation), self._banter_context(), avoid=self.recent_pet_lines[-10:])
+        if line:
+            self.show_bubble(line, 7200, source="static")
+            self._set_banter_emoji(str(situation), self._dominant_mood())
+            self._remember_pet_line(line)
+            self._last_wellbeing_care_at = now
+            self._last_spoken_bubble_at = now
+            expr = resp.get("expression")
+            if expr:
+                self.set_expression(str(expr))
 
     def _banter_context(self) -> Dict[str, object]:
         """Live state for the wit engine so instant lines match the real moment."""
@@ -5202,6 +5275,7 @@ class PetWindow(QWidget):
         self.cfg = self.store.config()
         now = time.time()
         self._update_mood_model()
+        self._wellbeing_tick()
         debris_count = self.debris_overlay.item_count() if self.cfg.debris_enabled else 0
         active_moving = self.current_action in {"clean", "go_bin", "chase_butterfly", "chase_eva", "watch_tv", "move_to", "kick_ball", "inspect_mouse", "kick_ball"} and self.target_point is not None
 
@@ -6098,6 +6172,10 @@ class PetWindow(QWidget):
                 "if_talking_about_butterfly": "only mention if butterfly_visible",
             },
             "time_context": self._local_time_context(),
+            "user_wellbeing": {
+                "state": getattr(self, "_last_wellbeing_state", "neutral"),
+                "note": "How the user seems to be doing. Attune to it: support if stressed, gently nudge rest if late/tired, celebrate a good grind, stay light during flow. Care, don't nag.",
+            },
             "tiny_agent_skills": self._tiny_agent_skill_context(),
             "compact_life_context_json": self._compressed_life_context_json(reason, counts, title),
             "mood": self._mood_snapshot(),

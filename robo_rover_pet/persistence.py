@@ -134,6 +134,34 @@ class PetMemoryStore:
             "patterns": self.top_patterns(),
         }
 
+    def note_active_day(self) -> Dict[str, object]:
+        """Track daily rhythm: returns whether this is a new day and the day streak.
+
+        Lets Wally greet each new day, notice how long you've been gone, and build a
+        consecutive-day streak — the backbone of feeling like a daily companion."""
+        from datetime import date
+
+        rel = dict(self.relationship())
+        today = date.today().isoformat()
+        last = str(rel.get("last_active_date", "") or "")
+        streak = int(rel.get("day_streak", 0) or 0)
+        days_since = 0
+        new_day = last != today
+        if new_day:
+            if last:
+                try:
+                    days_since = (date.today() - date.fromisoformat(last)).days
+                except Exception:
+                    days_since = 0
+                streak = streak + 1 if days_since == 1 else 1
+            else:
+                streak = 1
+            rel["last_active_date"] = today
+            rel["day_streak"] = streak
+            rel["best_streak"] = max(int(rel.get("best_streak", 0) or 0), streak)
+            self._data["relationship"] = rel
+        return {"new_day": new_day, "streak": streak, "days_since_last": days_since, "best_streak": int(rel.get("best_streak", streak))}
+
     def bond_stage(self) -> str:
         """How close Wally feels, so his tone can grow from shy to old-friend."""
         rel = self.relationship()

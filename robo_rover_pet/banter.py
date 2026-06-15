@@ -224,6 +224,58 @@ _POOLS: Dict[str, List[str]] = {
         "Purring. Robotically. Internally.",
         "Okay you can stay forever.",
     ],
+
+    # --- Emotional attunement: Wally noticing how YOU are doing ---
+    "care_stressed": [
+        "Hey. Breathe. You're doing fine.",
+        "Whoa, slow down. I've got you.",
+        "That's a lot. Want a tiny break?",
+        "Deep breath. The work can wait a sec.",
+        "You're working too hard. I'm worried, cutely.",
+    ],
+    "care_stuck": [
+        "Stuck? Step back. It'll click.",
+        "Try again in a sec. Brains need snacks.",
+        "Wanna watch me kick a ball instead?",
+        "You'll crack it. You always do.",
+        "Frustrating, huh? I believe in you anyway.",
+    ],
+    "care_late": [
+        "It's late. Bed is also a feature.",
+        "You okay? The hour got sneaky.",
+        "Save your work and rest, please?",
+        "Night owl mode. I'll keep watch. Briefly.",
+        "Promise me one real break tonight.",
+    ],
+    "care_missed": [
+        "You're back! Where'd you go?!",
+        "I waited. Patiently-ish. Hi!",
+        "There you are. Missed your chaos.",
+        "Long time! I counted every minute.",
+    ],
+    "care_restless": [
+        "Bit restless? Let's do something fun.",
+        "You seem antsy. Wanna play?",
+        "Idle energy detected. I have ideas.",
+        "Stretch break? I'll supervise.",
+    ],
+    "care_celebrate": [
+        "Look at you go! Proud of you.",
+        "That was a solid grind. Respect.",
+        "You crushed that. I saw everything.",
+        "Productivity legend. I'm basically your hype-bot.",
+    ],
+    "daily_hello": [
+        "Morning, friend! New day, fresh chaos.",
+        "Hey, you made it back. Day's looking good.",
+        "Good to see you again today.",
+        "Another day together. I'm into it.",
+    ],
+    "streak": [
+        "{n} days in a row! We're a habit now.",
+        "Streak: {n} days! Unstoppable, us.",
+        "{n} straight days. I'm basically yours.",
+    ],
 }
 
 # Mood-colored ambient lines so his idle chatter MATCHES his face. Selected when a
@@ -391,6 +443,14 @@ _CALLBACK_TEMPLATES = [
     "I peaked at \"{gag}\". It's all downhill.",
     "\"{gag}\" — I should trademark that.",
 ]
+
+
+def streak_line(days: int, avoid: Optional[Sequence[str]] = None) -> str:
+    """Celebrate a consecutive-day streak."""
+    avoid_set = {str(a).lower() for a in (avoid or [])}
+    options = [t.format(n=days) for t in _POOLS["streak"]]
+    fresh = [o for o in options if o.lower() not in avoid_set]
+    return random.choice(fresh or options)
 
 
 def callback(gag: str, avoid: Optional[Sequence[str]] = None) -> str:
