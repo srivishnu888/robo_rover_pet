@@ -4294,9 +4294,33 @@ class PetWindow(QWidget):
         line = banter.greeting(self._banter_context(), avoid=self.recent_pet_lines[-10:])
         if line:
             self.show_bubble(line, 6500, source="static")
+            self.emoji_effect = random.choice(["✨", "🤩", "🥰", "🎉", "👋"])
+            self.emoji_until = time.time() + 6.0
             self._last_spoken_bubble_at = time.time()
             self._remember_pet_line(line)
             self.set_expression("excited")
+
+    # Situations and moods each suggest an emoji, so even instant (non-LLM) lines get
+    # an expressive floating bubble instead of staying emoji-less.
+    _SITUATION_EMOJI = {
+        "eva_arrive": "💛", "eva_chase": "💛", "eva_left": "💔",
+        "ball_kick": "🏀", "ball_super": "⚡", "butterfly_arrive": "🦋",
+        "butterfly_chase": "🦋", "butterfly_caught": "🌟",
+        "picked_up": "😳", "held": "🥰", "dropped": "💫", "poke": "👀",
+        "double_poke": "🤭", "pet": "🥰", "rapid_typing": "⚡", "window_hopping": "👀",
+        "idle": "😴", "overwhelmed": "😩", "screen": "👀", "messy": "🧹",
+        "bored": "🥱", "playful": "😎", "clean_pride": "🏆", "late_night": "🌙", "morning": "☀️",
+    }
+    _MOOD_EMOJI = {
+        "excited": "🤩", "proud": "🏆", "irritated": "😤", "frustrated": "😩",
+        "bored": "🥱", "cozy": "🥰", "curious": "🤔", "playful": "😎",
+        "naughty": "😈", "anxious": "😬",
+    }
+
+    def _set_banter_emoji(self, situation: str, mood: Optional[str], seconds: float = 6.0) -> None:
+        emoji = self._SITUATION_EMOJI.get(situation) or (self._MOOD_EMOJI.get(mood or "") if mood else "") or "✨"
+        self.emoji_effect = emoji
+        self.emoji_until = time.time() + seconds
 
     def _instant_event_quip(self, situation: str, min_gap: float = 2.2, duration_ms: int = 6500) -> None:
         """Fire an instant in-character callout for a big event (EVA, ball, butterfly,
@@ -4304,9 +4328,11 @@ class PetWindow(QWidget):
         now = time.time()
         if now - float(getattr(self, "_last_event_quip_at", 0.0)) < min_gap:
             return
-        line = banter.pick(situation, self._banter_context(), avoid=self.recent_pet_lines[-10:], mood=self._dominant_mood())
+        mood = self._dominant_mood()
+        line = banter.pick(situation, self._banter_context(), avoid=self.recent_pet_lines[-10:], mood=mood)
         if line:
             self.show_bubble(line, duration_ms, source="static")
+            self._set_banter_emoji(situation, mood)
             self._remember_pet_line(line)
             self._last_event_quip_at = now
 
@@ -5829,9 +5855,11 @@ class PetWindow(QWidget):
         else:
             should_quip = now - last_quip > 9.0
         if should_quip:
-            line = banter.pick(situation, self._banter_context(), avoid=self.recent_pet_lines[-10:], mood=self._dominant_mood())
+            mood = self._dominant_mood()
+            line = banter.pick(situation, self._banter_context(), avoid=self.recent_pet_lines[-10:], mood=mood)
             if line:
                 self.show_bubble(line, 6500, source="static")
+                self._set_banter_emoji(situation, mood)
                 self._remember_pet_line(line)
                 self._last_instant_quip_at = now
 
@@ -6758,13 +6786,23 @@ class PetWindow(QWidget):
             self.right_arm_pose = right
 
         emoji_alias = {
-            "heart": "💛", "love": "💛", "sparkle": "✨", "star": "🌟", "question": "?", "exclamation": "!",
+            "heart": "💛", "love": "💛", "heartbreak": "💔", "sad": "💔", "sparkle": "✨", "star": "🌟", "question": "?", "exclamation": "!",
             "sleep": "😴", "zzz": "😴", "butterfly": "🦋", "basketball": "🏀", "ball": "🏀", "trash": "♻️", "bin": "🗑️", "clean": "🧹",
-            "music": "🍿", "movie": "📺", "tv": "📺", "wow": "😳", "sweat": "💧", "dizzy": "💫",
-            "laugh": "😂", "chuckle": "😅", "cool": "😎", "plant": "🌱", "inspect": "🔍", "zap": "⚡", "sing": "🎵", "song": "🎶", "music": "🎵", "giggle": "🤭", "oops": "🙃", "salute": "🫡", "tear": "🥹", "coffee": "☕", "bubbles": "🫧", "leaf": "🍃", "magic": "🪄", "none": ""
+            "music": "🎵", "movie": "📺", "tv": "📺", "wow": "😳", "sweat": "💧", "dizzy": "💫", "popcorn": "🍿",
+            "laugh": "😂", "chuckle": "😅", "cool": "😎", "plant": "🌱", "inspect": "🔍", "zap": "⚡", "sing": "🎵", "song": "🎶", "giggle": "🤭", "oops": "🙃", "salute": "🫡", "tear": "🥹", "coffee": "☕", "bubbles": "🫧", "leaf": "🍃", "magic": "🪄",
+            # Emotional palette so feelings have a face, not just a word.
+            "excited": "🤩", "starstruck": "🤩", "proud": "🏆", "trophy": "🏆", "angry": "😤", "mad": "😤", "huff": "😤",
+            "frustrated": "😩", "tired": "😮‍💨", "exhausted": "😮‍💨", "bored": "🥱", "yawn": "🥱", "cozy": "🥰", "adore": "🥰", "smug": "😏",
+            "curious": "🤔", "think": "🤔", "naughty": "😈", "mischief": "😈", "party": "🎉", "hype": "🎉", "celebrate": "🎉",
+            "fire": "🔥", "thumbsup": "👍", "ok": "👍", "eyes": "👀", "robot": "🤖", "idea": "💡", "rainbow": "🌈", "sun": "☀️", "moon": "🌙",
+            "wink": "😉", "blush": "☺️", "panic": "😱", "shock": "😱", "nervous": "😬", "pleading": "🥺", "none": "",
         }
         emoji = emoji_alias.get(emoji.lower(), emoji) if emoji else ""
-        allowed_emoji = {"", "?", "!", "💛", "✨", "🦋", "♻️", "😴", "😳", "👀", "🍿", "💧", "💫", "😂", "😅", "😎", "🌱", "📺", "🗑️", "🔍", "⚡", "🧹", "🌟", "💤", "😵‍💫", "🎵", "🎶", "🤭", "🙃", "🫡", "🥹", "☕", "🫧", "🍃", "🪄", "🎮", "🐾", "🛠️", "📌"}
+        allowed_emoji = {
+            "", "?", "!", "💛", "💔", "✨", "🦋", "♻️", "😴", "😳", "👀", "🍿", "💧", "💫", "😂", "😅", "😎", "🌱", "📺", "🗑️",
+            "🔍", "⚡", "🧹", "🌟", "💤", "😵‍💫", "🎵", "🎶", "🤭", "🙃", "🫡", "🥹", "☕", "🫧", "🍃", "🪄", "🎮", "🐾", "🛠️", "📌",
+            "🤩", "🏆", "😤", "😩", "😮‍💨", "🥱", "🥰", "😏", "🤔", "😈", "🎉", "🔥", "👍", "🤖", "💡", "🌈", "☀️", "🌙", "😉", "☺️", "😱", "😬", "🥺",
+        }
         if emoji in allowed_emoji:
             self.emoji_effect = emoji
             self.emoji_until = time.time() + (8.0 if emoji else 0)
