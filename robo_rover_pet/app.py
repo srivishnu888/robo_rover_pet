@@ -1251,6 +1251,7 @@ class DebrisOverlay(QWidget):
         self.store = store
         self.items: List[DebrisItem] = []
         self.puffs: List[Puff] = []
+        self.spawn_paused = False  # co-watch pauses new clutter
         self.wind = 0.0
         self.butterfly_visible = False
         self.butterfly_x = 0.0
@@ -1860,7 +1861,12 @@ class DebrisOverlay(QWidget):
         if random.random() < 0.00016:
             self.butterfly_visible = False
 
+    def set_spawn_paused(self, paused: bool) -> None:
+        self.spawn_paused = bool(paused)
+
     def _spawn_item(self, force: bool = False) -> None:
+        if self.spawn_paused and not force:
+            return
         w = max(1, self.width())
         h = max(1, self.height())
         if w < 20 or h < 20:
@@ -1888,6 +1894,8 @@ class DebrisOverlay(QWidget):
 
     def _spawn_side_swirler(self) -> None:
         """Spawn a small leaf/paper from screen edge as if wind blew it in."""
+        if self.spawn_paused:
+            return
         w = max(1, self.width())
         h = max(1, self.height())
         if w < 40 or h < 40:
@@ -1911,6 +1919,8 @@ class DebrisOverlay(QWidget):
 
     def _spawn_wind_pile(self, count: int = 8, force: bool = False) -> None:
         """Spawn a natural gust-pile from left/right/top/upper-air."""
+        if self.spawn_paused and not force:
+            return
         w = max(1, self.width())
         h = max(1, self.height())
         if w < 50 or h < 40:
@@ -1969,6 +1979,8 @@ class DebrisOverlay(QWidget):
 
     def _shed_tree_leaf(self) -> None:
         """Small green leaf falling from the tiny tree near the TV."""
+        if self.spawn_paused:
+            return
         w = max(1, self.width())
         h = max(1, self.height())
         ground_y = h - 6
@@ -5502,24 +5514,33 @@ class PetWindow(QWidget):
             titles = self._cowatch_session.setdefault("titles", [])
             if title[:90] not in titles:
                 titles.append(title[:90])
+        first_activation = not self._cowatch_active
         self._cowatch_active = True
+        # Co-watch is top priority: pause new clutter and EVA flybys so the couch
+        # stays calm and he isn't yanked away mid-show.
+        self.debris_overlay.set_spawn_paused(True)
 
-        # Send him to the sofa once; keep the watch window alive so he stays seated.
-        if self.current_action not in {"watch", "watch_tv"} and not active_moving:
+        # Distance-based: walk to the sofa, then sit. This overrides whatever he was
+        # doing (roaming, cleaning) so he actually goes instead of freezing in place.
+        tv_target = self._tv_target_point()
+        arrived = abs(self.x() - tv_target.x()) <= 30
+
+        if first_activation and now - self._last_spoken_bubble_at > 6:
+            self.show_bubble(random.choice(["Ooh, what are we watching? 🍿", "Movie time! Scooch over.", "Co-watch mode, engaged. 🍿"]), 5200, source="static")
+            self._last_spoken_bubble_at = now
+
+        if not arrived:
+            # Head to the sofa (interrupting any other goal).
             self._tv_break_reason = "cowatch"
             self._tv_break_duration_seconds = 90.0
-            self._set_current_goal_item(self._goal_item("co-watch with the human", "watch_tv", "tv_sofa", "cowatch", priority=8), lock_seconds=90.0)
-            self._apply_reaction_action("watch_tv", 3, "tv_sofa")
-            # Immediate visible feedback so you can tell co-watch armed.
-            if now - self._last_spoken_bubble_at > 6:
-                self.show_bubble(random.choice(["Ooh, what are we watching? 🍿", "Movie time! Scooch over.", "Co-watch mode, engaged. 🍿"]), 5200, source="static")
-                self._last_spoken_bubble_at = now
-            return True
-        # Still walking over to the TV.
-        if self.current_action == "watch_tv" and self.target_point is not None:
+            self.current_action = "watch_tv"
+            self.target_point = tv_target
+            self.pause_until = 0.0
+            self.set_expression("watching")
+            self._apply_body_controls({"eyes": "tv", "eyebrow": "focused", "emoji": "🍿", "left_arm": "shy", "right_arm": "point"})
             return True
 
-        # Seated and watching: stay cozy and keep the seat reserved.
+        # Arrived — seated and watching: stay cozy and keep the seat reserved.
         self._tv_break_until = max(getattr(self, "_tv_break_until", 0.0), now + 90.0)
         self.current_action = "watch"
         self.target_point = None
@@ -5542,6 +5563,7 @@ class PetWindow(QWidget):
         session = self._cowatch_session
         self._cowatch_active = False
         self._cowatch_session = None
+        self.debris_overlay.set_spawn_paused(False)  # clutter & gusts resume
         if not session:
             return
         started = float(session.get("started", time.time()))
@@ -6083,8 +6105,8 @@ class PetWindow(QWidget):
 
     def _update_workload_trash(self, keys: int, scrolls: int, words: int, typed_excerpt: str, current_window: str, now: float) -> Optional[Dict[str, object]]:
         """Turn sustained typing into visible mess and occasional cute overload tantrum."""
-        if not self.cfg.work_trash_enabled or not self.cfg.debris_enabled:
-            # Still decay the pressure when the feature is off.
+        if not self.cfg.work_trash_enabled or not self.cfg.debris_enabled or getattr(self, "_cowatch_active", False):
+            # Still decay the pressure when the feature is off or during co-watch.
             self.work_pressure = max(0.0, self.work_pressure - 0.45)
             self._work_burst_keys = 0
             return None
@@ -6753,6 +6775,9 @@ class PetWindow(QWidget):
 
     def _eva_flyby_event(self, force: bool = False) -> None:
         self._schedule_next_eva_flyby()
+        # Don't pull him off the couch mid-show.
+        if getattr(self, "_cowatch_active", False) and not force:
+            return
         if self.debris_overlay.eva_visible and not force:
             return
         self.debris_overlay.summon_eva_flyby()
