@@ -69,6 +69,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from . import banter
 from .llm import DEFAULT_PERSONALITY, OllamaClient, OllamaConfig, OllamaError, compact_pet_sentence
 from .persistence import PetMemoryStore
 
@@ -2750,6 +2751,8 @@ class PetWindow(QWidget):
         self._schedule_next_butterfly()
         self._schedule_next_eva_flyby()
         QTimer.singleShot(1200, self.snap_to_taskbar_lane)
+        # Instant in-character hello (no LLM wait), tuned to how well he knows you.
+        QTimer.singleShot(700, self._greet_on_launch)
         QTimer.singleShot(1800, lambda: self.request_ai_reaction("startup_self_intro", force=True, use_vision=False))
 
     def _scale_from_config(self) -> float:
@@ -4287,30 +4290,45 @@ class PetWindow(QWidget):
         # Occasionally react to a long burst, but not to every typing session.
         return keys >= 34 and len(typed) >= 45 and random.random() < 0.18
 
+    def _greet_on_launch(self) -> None:
+        line = banter.greeting(self._banter_context(), avoid=self.recent_pet_lines[-10:])
+        if line:
+            self.show_bubble(line, 6500, source="static")
+            self._last_spoken_bubble_at = time.time()
+            self._remember_pet_line(line)
+            self.set_expression("excited")
+
+    def _banter_context(self) -> Dict[str, object]:
+        """Live state for the wit engine so instant lines match the real moment."""
+        store = getattr(self, "memory_store", None)
+        rel = store.relationship_context() if store is not None else {}
+        monitor = self.activity_monitor
+        return {
+            "daypart": self._local_time_context().get("daypart", ""),
+            "recent_key_score": round(getattr(monitor, "recent_key_score", 0.0), 1),
+            "idle_seconds": round(max(0.0, time.time() - getattr(monitor, "last_input_time", time.time())), 1),
+            "window_changes": int(getattr(self, "_event_reaction_counters", {}).get("window", 0)),
+            "debris_count": self.debris_overlay.item_count() if self.cfg.debris_enabled else 0,
+            "work_pressure": round(self.work_pressure, 1),
+            "sessions": int(rel.get("sessions", 0) or 0),
+        }
+
     def _fallback_life_line(self, reason: str) -> str:
-        # Last-resort only: used when Ollama returns body controls without speech.
-        # Kept tiny so it does not become the main personality.
-        pool = [
-            "Should I sing badly?",
-            "Tiny joke loading.",
-            "This screen looks bossy.",
-            "I need a mission.",
-            "Human, blink sometimes.",
-            "Keyboard rain detected.",
-            "Maybe lunch exists.",
-            "The ball is suspicious.",
-            "I feel mildly iconic.",
-            "Tiny fact later?",
-            "Dust is judging us.",
-            "I choose mischief.",
-        ]
-        if "typing" in reason:
-            pool += ["That typing sounds spicy.", "Words are sprinting today."]
+        # Wally's reflexes: an instant, context-aware witty line when the LLM gives
+        # body controls without speech, is slow, or is offline. The wit engine reads
+        # the real moment (time, typing storm, mess, idle, how long we've known each
+        # other) so this never feels like a canned filler.
+        ctx = self._banter_context()
+        avoid = self.recent_pet_lines[-10:]
+        if "startup" in reason or "intro" in reason:
+            return banter.greeting(ctx, avoid=avoid)
         if "screen" in reason or "scene" in reason:
-            pool += ["Screen vibes noted.", "This screen has opinions."]
-        if "joke" in reason or "fact" in reason:
-            pool += ["Tiny joke pending.", "Fact gremlin awake."]
-        return random.choice(pool)
+            return banter.pick("screen", ctx, avoid=avoid)
+        if "overload" in reason or "work" in reason:
+            return banter.pick("overwhelmed", ctx, avoid=avoid)
+        if "typing" in reason:
+            return banter.pick("rapid_typing", ctx, avoid=avoid)
+        return banter.auto(ctx, avoid=avoid)
 
     def show_bubble(self, text: str, duration_ms: int = 7000, source: str = "static") -> None:
         # Keep bubbles readable; very short durations made lines vanish mid-read.
@@ -5679,22 +5697,32 @@ class PetWindow(QWidget):
             self.request_ai_reaction(f"event_{event_kind}", use_vision=use_vision)
             return
 
-        # Static fallback only when Ollama is offline; source dot shows this is local/static.
-        if not self.ai_online:
-            if event_kind.startswith("typing"):
-                self.show_bubble("Typing storm detected.", 6500, source="static")
-            elif event_kind == "window_changed":
-                self.show_bubble("New window. Interesting.", 6500, source="static")
-            elif event_kind == "scrolling":
-                self.show_bubble("Page waterfall detected.", 6500, source="static")
-            elif "dizzy" in event_kind:
-                self.show_bubble("Mouse tornado!", 6500, source="static")
-            elif "lifted" in event_kind:
-                self.show_bubble("Sky mouse?", 6500, source="static")
-            elif event_kind == "fast_mouse":
-                self.show_bubble("Cursor zoomies!", 6500, source="static")
-            elif event_kind == "idle":
-                self.show_bubble("Tiny watch duty.", 6500, source="static")
+        # Instant witty reflex for events that did NOT go to the LLM. Always fires when
+        # offline (the brain is silent anyway); when online it fires only occasionally
+        # and rate-limited, so Wally feels responsive without talking over himself.
+        situation_map = {
+            "window_changed": "window_hopping",
+            "scrolling": "screen",
+            "idle": "idle",
+        }
+        if event_kind.startswith("typing"):
+            situation = "rapid_typing"
+        elif "dizzy" in event_kind or event_kind == "fast_mouse" or "lifted" in event_kind:
+            situation = "playful"
+        else:
+            situation = situation_map.get(event_kind, "ambient")
+
+        last_quip = float(getattr(self, "_last_instant_quip_at", 0.0))
+        if self.ai_online:
+            should_quip = (now - last_quip > 18.0) and random.random() < 0.22
+        else:
+            should_quip = now - last_quip > 9.0
+        if should_quip:
+            line = banter.pick(situation, self._banter_context(), avoid=self.recent_pet_lines[-10:])
+            if line:
+                self.show_bubble(line, 6500, source="static")
+                self._remember_pet_line(line)
+                self._last_instant_quip_at = now
 
     def _local_time_context(self) -> Dict[str, object]:
         now_dt = datetime.now()
@@ -6332,7 +6360,7 @@ class PetWindow(QWidget):
             if "scheduled_scene_check" in request_reason or "manual_screen_check" in request_reason:
                 self.last_screen_reaction_signature = self._normalize_pet_line(bubble)[:80]
         elif was_offline:
-            self.show_bubble("Brain online and wiggly.", 7000, source="static")
+            self.show_bubble(banter.pick("error_brain", self._banter_context(), avoid=self.recent_pet_lines[-10:]), 7000, source="static")
             self._last_spoken_bubble_at = time.time()
         elif any(key in request_reason for key in ["ambient", "joke", "fact", "typing", "screen", "scene", "activity", "startup", "event", "work", "overload"]) and time.time() - self._last_spoken_bubble_at > 12:
             fallback_line = compact_pet_sentence(self._fallback_life_line(request_reason), max_words=self.cfg.speech_max_words, min_words=1)
