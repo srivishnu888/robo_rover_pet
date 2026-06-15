@@ -2643,10 +2643,12 @@ class PetWindow(QWidget):
         self._last_wellbeing_state = "neutral"
         # Co-watch mode: when the user is watching video, Wally sits at the TV and
         # quietly comments along every few minutes instead of disturbing them.
+        self._cowatch_enabled = self.store.boolean("pet/cowatch_enabled", False)
         self._cowatch_active = False
         self._cowatch_since = 0.0
         self._last_cowatch_comment_at = 0.0
         self._cowatch_interval = random.uniform(300, 600)
+        self._cowatch_session: Optional[Dict[str, object]] = None
         # Care/reciprocity: needs the user can satisfy by petting, playing, resting.
         # They decay over time and persist, so caring for Wally is continuous.
         self.needs: Dict[str, float] = {"affection": 70.0, "play": 60.0, "energy": 85.0}
@@ -3428,6 +3430,26 @@ class PetWindow(QWidget):
         if self.cfg.ai_reactions_enabled:
             self._pending_activity_note = {"kind": "reminder_alert", "text": reminder.text, "hint": "Wally is holding a reminder placard with bells."}
 
+    def _handle_cowatch_command(self, text: str) -> bool:
+        """Let the user turn co-watch mode on/off by chatting to Wally."""
+        t = text.lower().strip()
+        enable_hits = ("co-watch", "cowatch", "co watch", "watch with me", "watch together", "watch this with me")
+        disable_hits = ("stop watching", "stop co-watch", "stop cowatch", "watch alone", "don't watch", "dont watch", "leave me to watch")
+        wants_disable = any(h in t for h in disable_hits)
+        wants_enable = (not wants_disable) and any(h in t for h in enable_hits)
+        if not wants_enable and not wants_disable:
+            return False
+        self._cowatch_enabled = wants_enable
+        self.store.set_value("pet/cowatch_enabled", self._cowatch_enabled)
+        self.store.flush()
+        if wants_disable and self._cowatch_active:
+            self._end_cowatch_session()
+        msg = "Co-watch on! I'll grab the sofa. 🍿" if wants_enable else "Okay, you watch solo. I'll be around. 👋"
+        self.show_bubble(msg, 5200, source="tool")
+        if self.chat_dialog:
+            self.chat_dialog.append_pet(msg)
+        return True
+
     def submit_user_message(self, text: str) -> None:
         self.cfg = self.store.config()
         self._last_chat_user_text = text
@@ -3435,6 +3457,11 @@ class PetWindow(QWidget):
         self._satisfy_need("affection", 8, react=False)
         if self.chat_dialog:
             self.chat_dialog.append_user(text)
+
+        if self._handle_cowatch_command(text):
+            self.chat_history.append({"role": "user", "content": text})
+            self.chat_history = self.chat_history[-18:]
+            return
 
         # Tiny agent tools run before the chat worker, so reminders are never lost
         # just because a previous Ollama chat is still finishing.
@@ -5446,13 +5473,17 @@ class PetWindow(QWidget):
         """Co-watch mode: while the user watches video (YouTube/Netflix/etc.), Wally
         goes to the TV, sits, and comments along every 5-10 minutes by reading the
         screen — present and cozy, but deliberately NOT disturbing."""
+        if not self._cowatch_enabled:
+            if self._cowatch_active:
+                self._end_cowatch_session()
+            return False
         title = get_active_window_title()
         hint = infer_media_hint(title)
         is_media = hint in {"youtube", "netflix", "video_player"}
         if not is_media:
             if self._cowatch_active:
-                self._cowatch_active = False
-                self._cowatch_since = 0.0
+                self._end_cowatch_session()
+            self._cowatch_since = 0.0
             return False
 
         # Require the video to be sustained so brief clips don't trigger a sit-down.
@@ -5464,6 +5495,13 @@ class PetWindow(QWidget):
         if self.current_action == "chase_eva" and self.debris_overlay.eva_visible:
             return False
 
+        # Open a session the first time we settle in; track what we're watching.
+        if not self._cowatch_active or self._cowatch_session is None:
+            self._cowatch_session = {"started": now, "media": hint, "titles": [title[:90]], "comments": []}
+        else:
+            titles = self._cowatch_session.setdefault("titles", [])
+            if title[:90] not in titles:
+                titles.append(title[:90])
         self._cowatch_active = True
 
         # Send him to the sofa once; keep the watch window alive so he stays seated.
@@ -5494,9 +5532,42 @@ class PetWindow(QWidget):
             self._cowatch_comment(hint, title)
         return True
 
+    def _end_cowatch_session(self) -> None:
+        """Drop the live co-watch session but keep a short summary in memory so Wally
+        can call back to it later ('that show from last night?')."""
+        session = self._cowatch_session
+        self._cowatch_active = False
+        self._cowatch_session = None
+        if not session:
+            return
+        started = float(session.get("started", time.time()))
+        if time.time() - started < 90:  # too short to be worth remembering
+            return
+        titles = [t for t in session.get("titles", []) if t]
+        comments = list(session.get("comments", []))
+        title = titles[-1] if titles else ""
+        gist_bits = comments[-3:]
+        gist = " | ".join(gist_bits) if gist_bits else f"watched for {round((time.time()-started)/60)} min"
+        store = getattr(self, "memory_store", None)
+        if store is not None:
+            store.add_watch_history(str(session.get("media", "")), title, gist)
+
+    def _cowatch_session_context(self) -> Dict[str, object]:
+        session = self._cowatch_session or {}
+        started = float(session.get("started", time.time()))
+        comments = list(session.get("comments", []))
+        titles = list(session.get("titles", []))
+        return {
+            "watching_for_minutes": round(max(0.0, (time.time() - started) / 60.0), 1),
+            "title": (titles[-1] if titles else "")[:80],
+            "your_earlier_comments": comments[-5:],
+            "continuity_rule": "Build on what you already noticed this session; stay on the SAME show/plot. Be constructive and continuous, not a random unrelated remark.",
+        }
+
     def _cowatch_comment(self, media: str, title: str) -> None:
         """One short, in-character co-watching comment. Uses vision to read what's on
-        screen (plot/subtitles) when screenshot reactions are on; else a cozy quip."""
+        screen (plot/subtitles) when screenshot reactions are on; else a cozy quip.
+        Carries the running session context so comments stay continuous."""
         now = time.time()
         if self.bubble_text and now < float(getattr(self, "_bubble_protected_until", 0.0)):
             return
@@ -5505,7 +5576,8 @@ class PetWindow(QWidget):
                 "kind": "cowatch",
                 "media": media,
                 "window": title[:80],
-                "hint": "You are co-watching this with the user. Read what's on screen (the scene, action, or subtitles) and make ONE short, quiet, in-character reaction or comment, like a chill friend on the couch. Do not narrate everything; do not be annoying. React to the actual content.",
+                "session": self._cowatch_session_context(),
+                "hint": "You are co-watching this with the user. Read what's on screen (scene, action, subtitles) and make ONE short, quiet, in-character reaction that BUILDS ON your earlier comments this session (same show, continuous thoughts). Don't narrate everything; don't be annoying.",
                 "tone_choices": ["cozy", "curious", "funny", "surprised", "sarcastic", "soft"],
             }
             self.request_ai_reaction("cowatch_screen_comment", force=True, use_vision=True)
@@ -6310,6 +6382,8 @@ class PetWindow(QWidget):
             "recent_chat": recent_chat,
             "conversation_highlights": conversation_highlights,
             "conversation_note": "Past chats with this user. Reference them naturally to build rapport and call back to earlier topics.",
+            "watch_history": store.get_watch_history() if store is not None else [],
+            "watch_history_note": "Shows/videos you co-watched together before. Call back to them naturally ('that show from earlier?').",
             "relationship": relationship,
             "relationship_note": "Long-term bond with this user; reference it naturally when it fits, never robotically.",
             "running_gags": running_gags,
@@ -6958,6 +7032,9 @@ class PetWindow(QWidget):
             self._last_spoken_bubble_at = time.time()
             self._remember_pet_line(bubble)
             self._maybe_record_gag(bubble)
+            if "cowatch" in request_reason and isinstance(self._cowatch_session, dict):
+                self._cowatch_session.setdefault("comments", []).append(bubble[:90])
+                self._cowatch_session["comments"] = self._cowatch_session["comments"][-8:]
             if "scheduled_scene_check" in request_reason or "manual_screen_check" in request_reason:
                 self.last_screen_reaction_signature = self._normalize_pet_line(bubble)[:80]
         elif was_offline:

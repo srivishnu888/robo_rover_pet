@@ -120,6 +120,29 @@ class PetMemoryStore:
                 t["followed_up"] = True
         self._data["threads"] = threads
 
+    # ------------------------------------------------------- watch history
+    def add_watch_history(self, media: str, title: str, gist: str) -> None:
+        """Store a compact summary of a finished co-watch session for future callbacks."""
+        title = str(title or "").strip()[:90]
+        if not title and not gist:
+            return
+        hist = self._data.get("watch_history")
+        if not isinstance(hist, list):
+            hist = []
+        hist.append({
+            "when": datetime.now().isoformat(timespec="minutes"),
+            "media": str(media or "")[:20],
+            "title": title,
+            "gist": str(gist or "").strip()[:160],
+        })
+        self._data["watch_history"] = hist[-15:]
+
+    def get_watch_history(self, limit: int = 5) -> List[Dict[str, str]]:
+        hist = self._data.get("watch_history", [])
+        if not isinstance(hist, list):
+            return []
+        return [h for h in hist[-limit:] if isinstance(h, dict)]
+
     def get_needs(self) -> Dict[str, float]:
         needs = self._data.get("needs", {})
         out: Dict[str, float] = {}
@@ -294,6 +317,7 @@ class PetMemoryStore:
             "needs": {k: round(float(v), 1) for k, v in (needs or self.get_needs()).items()},
             "conversations": self._data.get("conversations", []),
             "threads": self._data.get("threads", []),
+            "watch_history": self._data.get("watch_history", []),
         }
         try:
             tmp = self.path.with_suffix(".json.tmp")
