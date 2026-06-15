@@ -2641,6 +2641,12 @@ class PetWindow(QWidget):
         self._last_wellbeing_tick_at = 0.0
         self._last_wellbeing_care_at = 0.0
         self._last_wellbeing_state = "neutral"
+        # Co-watch mode: when the user is watching video, Wally sits at the TV and
+        # quietly comments along every few minutes instead of disturbing them.
+        self._cowatch_active = False
+        self._cowatch_since = 0.0
+        self._last_cowatch_comment_at = 0.0
+        self._cowatch_interval = random.uniform(300, 600)
         # Care/reciprocity: needs the user can satisfy by petting, playing, resting.
         # They decay over time and persist, so caring for Wally is continuous.
         self.needs: Dict[str, float] = {"affection": 70.0, "play": 60.0, "energy": 85.0}
@@ -4459,6 +4465,8 @@ class PetWindow(QWidget):
         if now - self._last_wellbeing_tick_at < 30.0:
             return
         self._last_wellbeing_tick_at = now
+        if getattr(self, "_cowatch_active", False):
+            return  # stay quiet during co-watch
         if self.is_dragging or self.current_action in {"clean", "go_bin", "chase_eva", "chase_butterfly", "kick_ball"}:
             return
 
@@ -4523,7 +4531,7 @@ class PetWindow(QWidget):
             self._nudge_mood(bored=0.5 * per_min)
 
         # Occasionally voice the most-neglected need (gently, well-spaced).
-        if self.is_dragging or now - self._last_need_request_at < 110.0:
+        if self.is_dragging or getattr(self, "_cowatch_active", False) or now - self._last_need_request_at < 110.0:
             return
         if self.bubble_text and now < float(getattr(self, "_bubble_protected_until", 0.0)):
             return
@@ -4549,6 +4557,8 @@ class PetWindow(QWidget):
         store = getattr(self, "memory_store", None)
         if store is None:
             return
+        if getattr(self, "_cowatch_active", False):
+            return  # don't interrupt the show with a check-in
         now = time.time()
         if now - float(getattr(self, "_last_followup_at", 0.0)) < 480.0:
             return
@@ -5432,6 +5442,82 @@ class PetWindow(QWidget):
         }
         self.request_ai_reaction(reason, force=True, use_vision=False)
 
+    def _maybe_cowatch(self, now: float, active_moving: bool) -> bool:
+        """Co-watch mode: while the user watches video (YouTube/Netflix/etc.), Wally
+        goes to the TV, sits, and comments along every 5-10 minutes by reading the
+        screen — present and cozy, but deliberately NOT disturbing."""
+        title = get_active_window_title()
+        hint = infer_media_hint(title)
+        is_media = hint in {"youtube", "netflix", "video_player"}
+        if not is_media:
+            if self._cowatch_active:
+                self._cowatch_active = False
+                self._cowatch_since = 0.0
+            return False
+
+        # Require the video to be sustained so brief clips don't trigger a sit-down.
+        if not self._cowatch_since:
+            self._cowatch_since = now
+        if now - self._cowatch_since < 25:
+            return False
+        # Don't hijack a high-priority drama (EVA) or an in-progress travel.
+        if self.current_action == "chase_eva" and self.debris_overlay.eva_visible:
+            return False
+
+        self._cowatch_active = True
+
+        # Send him to the sofa once; keep the watch window alive so he stays seated.
+        if self.current_action not in {"watch", "watch_tv"} and not active_moving:
+            self._tv_break_reason = "cowatch"
+            self._tv_break_duration_seconds = 90.0
+            self._set_current_goal_item(self._goal_item("co-watch with the human", "watch_tv", "tv_sofa", "cowatch", priority=8), lock_seconds=90.0)
+            self._apply_reaction_action("watch_tv", 3, "tv_sofa")
+            return True
+        # Still walking over to the TV.
+        if self.current_action == "watch_tv" and self.target_point is not None:
+            return True
+
+        # Seated and watching: stay cozy and keep the seat reserved.
+        self._tv_break_until = max(getattr(self, "_tv_break_until", 0.0), now + 90.0)
+        self.current_action = "watch"
+        self.target_point = None
+        self.pause_until = now + 4.0
+        if self.expression != "watching":
+            self.set_expression("watching")
+            self._apply_body_controls({"eyes": "tv", "eyebrow": "focused", "emoji": "🍿", "left_arm": "shy", "right_arm": "hold"})
+        self._nudge_mood(cozy=0.5, bored=-0.4, irritated=-0.3)
+
+        # Quiet commentary every 5-10 minutes, reading the screen if vision is on.
+        if now - self._last_cowatch_comment_at >= self._cowatch_interval:
+            self._last_cowatch_comment_at = now
+            self._cowatch_interval = random.uniform(300, 600)
+            self._cowatch_comment(hint, title)
+        return True
+
+    def _cowatch_comment(self, media: str, title: str) -> None:
+        """One short, in-character co-watching comment. Uses vision to read what's on
+        screen (plot/subtitles) when screenshot reactions are on; else a cozy quip."""
+        now = time.time()
+        if self.bubble_text and now < float(getattr(self, "_bubble_protected_until", 0.0)):
+            return
+        if self.cfg.ai_reactions_enabled and self.cfg.screenshot_reactions_enabled and not self._thread_running(self.reaction_worker):
+            self._pending_activity_note = {
+                "kind": "cowatch",
+                "media": media,
+                "window": title[:80],
+                "hint": "You are co-watching this with the user. Read what's on screen (the scene, action, or subtitles) and make ONE short, quiet, in-character reaction or comment, like a chill friend on the couch. Do not narrate everything; do not be annoying. React to the actual content.",
+                "tone_choices": ["cozy", "curious", "funny", "surprised", "sarcastic", "soft"],
+            }
+            self.request_ai_reaction("cowatch_screen_comment", force=True, use_vision=True)
+        elif now - self._last_spoken_bubble_at > 20:
+            line = banter.pick("screen", self._banter_context(), avoid=self.recent_pet_lines[-10:], mood=self._dominant_mood())
+            if line:
+                self.show_bubble(line, 7000, source="static")
+                self.emoji_effect = "🍿"
+                self.emoji_until = now + 6.0
+                self._remember_pet_line(line)
+                self._last_spoken_bubble_at = now
+
     def _maybe_scheduled_tv_break(self, now: float, active_moving: bool) -> bool:
         # At least one 30-second TV break every 5 minutes, unless Wally is in a critical action.
         if now < getattr(self, "_tv_break_until", 0):
@@ -5509,6 +5595,10 @@ class PetWindow(QWidget):
         # Do not let TV breaks, cleaning, roaming, or random goals steal the EVA chase.
         if self.debris_overlay.eva_visible and self.current_action == "chase_eva":
             self.target_point = self._eva_target_point()
+            return
+
+        # Co-watch takes priority over cleaning/roaming/tantrums so video time stays calm.
+        if self._maybe_cowatch(now, active_moving):
             return
 
         if self._maybe_scheduled_tv_break(now, active_moving):
@@ -6413,6 +6503,10 @@ class PetWindow(QWidget):
                 "state": getattr(self, "_last_wellbeing_state", "neutral"),
                 "note": "How the user seems to be doing. Attune to it: support if stressed, gently nudge rest if late/tired, celebrate a good grind, stay light during flow. Care, don't nag.",
             },
+            "cowatch": {
+                "active": bool(getattr(self, "_cowatch_active", False)),
+                "note": "You're cozily watching video together. Comment only occasionally and briefly, like a chill couch buddy reacting to the scene/subtitles. Never spam.",
+            } if getattr(self, "_cowatch_active", False) else None,
             "needs": {
                 "affection": int(self.needs.get("affection", 70)),
                 "play": int(self.needs.get("play", 60)),
@@ -6502,6 +6596,9 @@ class PetWindow(QWidget):
             self._schedule_next_ai_reaction()
         if reason in {"ambient_character_tick", "startup_self_intro", "manual_ai_enabled"}:
             self._schedule_next_ambient_ai()
+        # During co-watch, suppress generic chatter; co-watch owns the commentary.
+        if getattr(self, "_cowatch_active", False) and reason in {"ambient_character_tick", "scheduled_scene_check"}:
+            return
         if not self.cfg.ai_reactions_enabled and not force:
             return
         if self._thread_running(self.reaction_worker):

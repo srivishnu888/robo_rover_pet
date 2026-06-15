@@ -142,7 +142,7 @@ REACTION_SCHEMA: Dict[str, object] = {
 # budget we drop *whole* low-priority keys from the end, so the model never receives a
 # JSON object that was sliced mid-token (the previous behavior corrupted world state).
 _REACTION_CONTEXT_PRIORITY = [
-    "r", "creative_intent", "user_wellbeing", "needs", "typed_text", "goal", "act", "expr", "world", "activity", "pending_event",
+    "r", "creative_intent", "cowatch", "user_wellbeing", "needs", "typed_text", "goal", "act", "expr", "world", "activity", "pending_event",
     "user_instruction", "screen", "scene", "media", "window",
     "mood", "mood_top", "drive", "life_memory", "memory",
     "inner_thought_feed", "speech_max_words", "tiny_agent_skills",
