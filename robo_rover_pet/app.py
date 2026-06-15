@@ -2659,6 +2659,7 @@ class PetWindow(QWidget):
         self._cowatch_active = False
         self._cowatch_since = 0.0
         self._last_cowatch_comment_at = 0.0
+        self._last_cowatch_obs_at = 0.0
         self._cowatch_interval = random.uniform(300, 600)
         self._cowatch_session: Optional[Dict[str, object]] = None
         # Care/reciprocity: needs the user can satisfy by petting, playing, resting.
@@ -5509,7 +5510,7 @@ class PetWindow(QWidget):
 
         # Open a session the first time we settle in; track what we're watching.
         if not self._cowatch_active or self._cowatch_session is None:
-            self._cowatch_session = {"started": now, "media": hint, "titles": [title[:90]], "comments": []}
+            self._cowatch_session = {"started": now, "media": hint, "titles": [title[:90]], "comments": [], "observations": [], "summary": "", "obs_since_comment": 0}
         else:
             titles = self._cowatch_session.setdefault("titles", [])
             if title[:90] not in titles:
@@ -5550,12 +5551,45 @@ class PetWindow(QWidget):
             self._apply_body_controls({"eyes": "tv", "eyebrow": "focused", "emoji": "🍿", "left_arm": "shy", "right_arm": "hold"})
         self._nudge_mood(cozy=0.5, bored=-0.4, irritated=-0.3)
 
-        # Quiet commentary every 5-10 minutes, reading the screen if vision is on.
-        if now - self._last_cowatch_comment_at >= self._cowatch_interval:
-            self._last_cowatch_comment_at = now
-            self._cowatch_interval = random.uniform(300, 600)
-            self._cowatch_comment(hint, title)
+        self._cowatch_media_tick(hint, title, now)
         return True
+
+    def _cowatch_media_tick(self, hint: str, title: str, now: float) -> None:
+        """Two-tier co-watching: silently build context every ~30s, then comment when
+        enough has accumulated so the remark reflects the unfolding story."""
+        # Vision is required to read the screen/subtitles for real co-watch context.
+        if not (self.cfg.ai_reactions_enabled and self.cfg.screenshot_reactions_enabled):
+            # No vision: fall back to a sparse cozy quip so he's still present.
+            if now - self._last_cowatch_comment_at >= 420:
+                self._last_cowatch_comment_at = now
+                self._cowatch_comment(hint, title)
+            return
+        if self._thread_running(self.reaction_worker) or self._thread_running(self.worker):
+            return
+
+        session = self._cowatch_session if isinstance(self._cowatch_session, dict) else {}
+        obs_since = int(session.get("obs_since_comment", 0))
+        since_comment = now - self._last_cowatch_comment_at
+
+        # Comment when enough new context has built (and not too soon), or force one
+        # at least every ~5 minutes so he's never silent for a whole act.
+        ready_to_comment = (obs_since >= 4 and since_comment >= 120) or since_comment >= 300
+        if ready_to_comment and not (self.bubble_text and now < float(getattr(self, "_bubble_protected_until", 0.0))):
+            self._last_cowatch_comment_at = now
+            if isinstance(self._cowatch_session, dict):
+                self._cowatch_session["obs_since_comment"] = 0
+            self._cowatch_comment(hint, title)
+            return
+
+        # Otherwise keep silently building context roughly every 30 seconds.
+        if now - float(getattr(self, "_last_cowatch_obs_at", 0.0)) >= 30:
+            self._last_cowatch_obs_at = now
+            self._pending_activity_note = {
+                "kind": "cowatch_observe",
+                "media": hint,
+                "instruction": "SILENT observation. Look at the screen and return b as a terse factual 4-8 word note of what's happening right now (scene/action/subtitle). No jokes, no character voice, just the note.",
+            }
+            self.request_ai_reaction("cowatch_observe", force=True, use_vision=True)
 
     def _end_cowatch_session(self) -> None:
         """Drop the live co-watch session but keep a short summary in memory so Wally
@@ -5586,9 +5620,29 @@ class PetWindow(QWidget):
         return {
             "watching_for_minutes": round(max(0.0, (time.time() - started) / 60.0), 1),
             "title": (titles[-1] if titles else "")[:80],
+            "story_so_far": str(session.get("summary", ""))[:500],
+            "recent_moments": list(session.get("observations", []))[-8:],
             "your_earlier_comments": comments[-5:],
-            "continuity_rule": "Build on what you already noticed this session; stay on the SAME show/plot. Be constructive and continuous, not a random unrelated remark.",
+            "continuity_rule": "You have been watching this the whole time. Use story_so_far and recent_moments for continuity, react to the CURRENT screen, and don't repeat your earlier_comments. Feel like a friend who's been on the couch the whole show.",
         }
+
+    def _cowatch_add_observation(self, note: str) -> None:
+        """Append a silent observation and fold old ones into a rolling summary so a
+        long video keeps continuity without the context growing unbounded."""
+        session = self._cowatch_session
+        if not isinstance(session, dict):
+            return
+        note = str(note or "").strip()[:90]
+        if len(note) < 4:
+            return
+        obs = session.setdefault("observations", [])
+        obs.append(note)
+        session["obs_since_comment"] = int(session.get("obs_since_comment", 0)) + 1
+        # Fold the oldest observations into a compact running summary (no extra LLM call).
+        if len(obs) > 10:
+            folded = " / ".join(obs[:5])
+            session["summary"] = (str(session.get("summary", "")) + " " + folded).strip()[-500:]
+            session["observations"] = obs[-5:]
 
     def _cowatch_comment(self, media: str, title: str) -> None:
         """One short, in-character co-watching comment. Uses vision to read what's on
@@ -6750,7 +6804,7 @@ class PetWindow(QWidget):
         self._reaction_reason_in_flight = reason
         self.last_ai_request_at = time.time()
         self.set_expression("watching" if include_screenshot else "thinking")
-        if force:
+        if force and reason != "cowatch_observe":
             self.show_bubble("hmm!", 1800)
         self.reaction_worker = ReactionWorker(self.cfg, context, image_b64=image_b64)
         self.reaction_worker.finished_ok.connect(self._on_reaction_decision)
@@ -6947,6 +7001,13 @@ class PetWindow(QWidget):
 
         request_reason = self._reaction_reason_in_flight or ""
         self._reaction_reason_in_flight = ""
+
+        # Silent co-watch observation: store it as context, never speak it.
+        if request_reason == "cowatch_observe":
+            note = str(decision.get("bubble") or decision.get("goal") or "").strip()
+            self._cowatch_add_observation(note)
+            self._schedule_next_ambient_ai()
+            return
 
         expression = str(decision.get("expression", "curious"))
         action = str(decision.get("action", "none"))
