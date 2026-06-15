@@ -2393,15 +2393,16 @@ class ActivityMonitor:
             clicks = self.click_count
             scrolls = self.scroll_count
             words = self.word_count
-            typed_excerpt = self.typed_buffer[-120:]
+            # Send the last ~30 typed words so Wally can riff on the actual content.
+            typed_excerpt = " ".join(self.typed_buffer.split()[-30:])[-220:]
             if typed_excerpt.strip():
                 self.last_typed_excerpt = typed_excerpt
             self.key_count = 0
             self.click_count = 0
             self.scroll_count = 0
             self.word_count = 0
-            # Keep a little rolling typed context, but do not accumulate indefinitely.
-            self.typed_buffer = self.typed_buffer[-160:]
+            # Keep a rolling window of recent typing, but do not accumulate indefinitely.
+            self.typed_buffer = self.typed_buffer[-400:]
         self.recent_key_score = self.recent_key_score * 0.82 + keys
         self.recent_click_score = self.recent_click_score * 0.82 + clicks
         self.recent_scroll_score = self.recent_scroll_score * 0.82 + scrolls
@@ -2415,8 +2416,8 @@ class ActivityMonitor:
             "recent_scroll_score": round(self.recent_scroll_score, 1),
             "mouse_motion_score": round(self.motion_score, 2),
             "idle_seconds": round(max(0.0, time.time() - self.last_input_time), 1),
-            "typed_excerpt": typed_excerpt[-100:],
-            "recent_typed_excerpt": self.last_typed_excerpt[-100:],
+            "typed_excerpt": typed_excerpt[-200:],
+            "recent_typed_excerpt": self.last_typed_excerpt[-200:],
             "typing_context_note": "This is text the user is typing elsewhere, not speech to the pet.",
             "listener_error": self.listener_error,
         }
@@ -2452,7 +2453,7 @@ class ActivityMonitor:
                         elif name in {"enter", "tab"}:
                             finish_word_if_needed()
                             self.typed_buffer += " "
-                    self.typed_buffer = self.typed_buffer[-220:]
+                    self.typed_buffer = self.typed_buffer[-400:]
 
             def on_scroll(_x, _y, _dx, dy) -> None:
                 with self._lock:
@@ -2628,6 +2629,14 @@ class PetWindow(QWidget):
         self._last_wellbeing_tick_at = 0.0
         self._last_wellbeing_care_at = 0.0
         self._last_wellbeing_state = "neutral"
+        # Care/reciprocity: needs the user can satisfy by petting, playing, resting.
+        # They decay over time and persist, so caring for Wally is continuous.
+        self.needs: Dict[str, float] = {"affection": 70.0, "play": 60.0, "energy": 85.0}
+        for key, value in self.memory_store.get_needs().items():
+            if key in self.needs:
+                self.needs[key] = max(0.0, min(100.0, value))
+        self._last_needs_tick_at = time.time()
+        self._last_need_request_at = 0.0
         restored_events = self.memory_store.get_action_memory()
         if restored_events:
             self.action_memory = restored_events[-32:]
@@ -3403,6 +3412,8 @@ class PetWindow(QWidget):
 
     def submit_user_message(self, text: str) -> None:
         self.cfg = self.store.config()
+        # Talking to him is affection too.
+        self._satisfy_need("affection", 8, react=False)
         if self.chat_dialog:
             self.chat_dialog.append_user(text)
 
@@ -4271,6 +4282,7 @@ class PetWindow(QWidget):
             recent_pet_lines=self.recent_pet_lines,
             moods=self.moods,
             lines_spoken_delta=delta,
+            needs=self.needs,
             force=force,
         )
 
@@ -4343,6 +4355,38 @@ class PetWindow(QWidget):
         emoji = self._SITUATION_EMOJI.get(situation) or (self._MOOD_EMOJI.get(mood or "") if mood else "") or "✨"
         self.emoji_effect = emoji
         self.emoji_until = time.time() + seconds
+
+    _SENSITIVE_WINDOW_HINTS = (
+        "password", "passwd", "log in", "login", "sign in", "signin", "bank", "lastpass",
+        "1password", "bitwarden", "keepass", "authenticator", "otp", "credit card",
+        "payment", "checkout", "paypal", "ssn", "private browsing", "incognito",
+    )
+
+    def _looks_sensitive_typing(self, window: str, text: str) -> bool:
+        """Best-effort guard: don't relay typing from password/login/banking contexts."""
+        w = (window or "").lower()
+        if any(hint in w for hint in self._SENSITIVE_WINDOW_HINTS):
+            return True
+        t = (text or "").strip()
+        # Password-shaped token: long, no spaces, mixed character classes.
+        if t and " " not in t and len(t) >= 8 and re.search(r"[A-Z]", t) and re.search(r"\d", t) and re.search(r"[^A-Za-z0-9]", t):
+            return True
+        return False
+
+    def _typed_text_payload(self, window: str, counts: Dict[str, object]) -> Optional[Dict[str, object]]:
+        """Framed snippet of what the user is actually typing, so Wally can react to
+        the CONTENT — witty, sarcastic, or a warm acknowledgement. Privacy-guarded."""
+        if not self.cfg.screen_awareness_enabled:
+            return None
+        text = str(counts.get("typed_excerpt") or counts.get("recent_typed_excerpt") or "").strip()
+        if len(text) < 6 or self._looks_sensitive_typing(window, text):
+            return None
+        return {
+            "text": text[-200:],
+            "in_window": window[:70],
+            "is_speech_to_pet": False,
+            "how_to_react": "This is what the user is typing right now. If it's interesting, react to the CONTENT with a witty, sarcastic, or warm one-liner; otherwise a tiny acknowledgement or silence. Never repeat their words back verbatim.",
+        }
 
     def _instant_event_quip(self, situation: str, min_gap: float = 2.2, duration_ms: int = 6500) -> None:
         """Fire an instant in-character callout for a big event (EVA, ball, butterfly,
@@ -4417,6 +4461,84 @@ class PetWindow(QWidget):
             expr = resp.get("expression")
             if expr:
                 self.set_expression(str(expr))
+
+    _NEED_REQUEST = {"affection": "want_affection", "play": "want_play", "energy": "want_rest"}
+    _NEED_THANKS = {"affection": "thanks_affection", "play": "thanks_play", "energy": "thanks_rest"}
+    _NEED_EMOJI = {"affection": "🥺", "play": "🎮", "energy": "🔋"}
+
+    def _needs_tick(self) -> None:
+        """Decay Wally's needs over time; when one runs low, he asks to be cared for.
+
+        This is the reciprocity loop: petting, playing, and letting him rest refill
+        the needs, so the bond goes both ways instead of being one-directional."""
+        now = time.time()
+        dt = min(120.0, max(0.0, now - self._last_needs_tick_at))
+        self._last_needs_tick_at = now
+        if dt <= 0:
+            return
+        per_min = dt / 60.0
+        moving = self.current_action in {"clean", "go_bin", "chase_eva", "chase_butterfly", "kick_ball", "move_to", "roam"}
+        self.needs["affection"] = max(0.0, self.needs["affection"] - 1.3 * per_min)
+        self.needs["play"] = max(0.0, self.needs["play"] - 1.7 * per_min)
+        # Energy drains with activity, slowly refills while idle/napping.
+        if self.current_action in {"nap", "chill", "pause"} and not moving:
+            self.needs["energy"] = min(100.0, self.needs["energy"] + 2.2 * per_min)
+        else:
+            self.needs["energy"] = max(0.0, self.needs["energy"] - (2.4 if moving else 1.1) * per_min)
+
+        # Let mood reflect chronic unmet needs.
+        if self.needs["affection"] < 30:
+            self._nudge_mood(cozy=-0.5 * per_min, anxious=0.4 * per_min)
+        if self.needs["play"] < 30:
+            self._nudge_mood(bored=1.2 * per_min, playful=0.6 * per_min)
+        if self.needs["energy"] < 30:
+            self._nudge_mood(bored=0.5 * per_min)
+
+        # Occasionally voice the most-neglected need (gently, well-spaced).
+        if self.is_dragging or now - self._last_need_request_at < 110.0:
+            return
+        if self.bubble_text and now < float(getattr(self, "_bubble_protected_until", 0.0)):
+            return
+        low_key, low_val = min(self.needs.items(), key=lambda kv: kv[1])
+        if low_val >= 28 or random.random() < 0.4:
+            return
+        situation = self._NEED_REQUEST.get(low_key)
+        if not situation:
+            return
+        line = banter.pick(situation, self._banter_context(), avoid=self.recent_pet_lines[-10:])
+        if line:
+            self.show_bubble(line, 6800, source="static")
+            self.emoji_effect = self._NEED_EMOJI.get(low_key, "🥺")
+            self.emoji_until = now + 6.0
+            self.set_expression("soft" if low_key == "affection" else ("sleepy" if low_key == "energy" else "curious"))
+            self._remember_pet_line(line)
+            self._last_need_request_at = now
+
+    def _satisfy_need(self, name: str, amount: float, react: bool = True) -> None:
+        """The user did something caring; refill a need and show gratitude."""
+        if name not in self.needs:
+            return
+        before = self.needs[name]
+        self.needs[name] = min(100.0, before + amount)
+        gained = self.needs[name] - before
+        if name == "affection":
+            self._nudge_mood(cozy=8, proud=4, encouraging=4, anxious=-6)
+        elif name == "play":
+            self._nudge_mood(playful=10, excited=8, bored=-12)
+        elif name == "energy":
+            self._nudge_mood(cozy=6, bored=-4)
+        # Visible gratitude when a low need is meaningfully refilled.
+        if react and before < 55 and gained >= 6:
+            now = time.time()
+            if now - float(getattr(self, "_last_event_quip_at", 0.0)) >= 2.0:
+                line = banter.pick(self._NEED_THANKS.get(name, "thanks_affection"), self._banter_context(), avoid=self.recent_pet_lines[-10:])
+                if line:
+                    self.show_bubble(line, 6200, source="static")
+                    self.emoji_effect = "🥰" if name == "affection" else self._NEED_EMOJI.get(name, "✨")
+                    self.emoji_until = now + 5.0
+                    self.set_expression("love" if name == "affection" else "happy")
+                    self._remember_pet_line(line)
+                    self._last_event_quip_at = now
 
     def _banter_context(self) -> Dict[str, object]:
         """Live state for the wit engine so instant lines match the real moment."""
@@ -4733,6 +4855,7 @@ class PetWindow(QWidget):
         self.current_action = "pause"
         self.target_point = None
         self.pause_until = time.time() + (2.4 if super_kick else random.uniform(1.4, 3.0))
+        self._satisfy_need("play", 16 if super_kick else 10, react=False)
         # Instant commentary; the LLM (when it comments) upgrades this line.
         self._instant_event_quip("ball_super" if super_kick else "ball_kick")
         event = {"did": "kick_ball", "reason": reason, "kick": kick, "ball": self.debris_overlay.ball_status(), "super": super_kick}
@@ -5276,6 +5399,7 @@ class PetWindow(QWidget):
         now = time.time()
         self._update_mood_model()
         self._wellbeing_tick()
+        self._needs_tick()
         debris_count = self.debris_overlay.item_count() if self.cfg.debris_enabled else 0
         active_moving = self.current_action in {"clean", "go_bin", "chase_butterfly", "chase_eva", "watch_tv", "move_to", "kick_ball", "inspect_mouse", "kick_ball"} and self.target_point is not None
 
@@ -5494,6 +5618,7 @@ class PetWindow(QWidget):
                 self.pause_until = time.time() + random.uniform(2.5, 5.0)
                 self._remember_event("caught_up_to_butterfly", text="butterfly chase", data={"did": "caught_butterfly_moment", "butterfly": self.debris_overlay.butterfly_status()})
                 self._nudge_mood(proud=12, excited=10, playful=8, bored=-12)
+                self._satisfy_need("play", 12, react=False)
                 if time.time() < getattr(self, "_eva_recovery_until", 0.0):
                     self._eva_recovery_until = 0.0
                     self._nudge_mood(playful=12, excited=8, frustrated=-10, anxious=-5, curious=6)
@@ -6154,6 +6279,7 @@ class PetWindow(QWidget):
             "last_user_instruction": self._last_user_instruction[-180:],
             "screen_question": self._last_screen_question[-180:],
             "window": title[:120],
+            "typed_text": self._typed_text_payload(title, counts),
             "media": infer_media_hint(title),
             "scene": infer_scene_guess(title, None),
             "memory": recent_memory[-6:],
@@ -6175,6 +6301,12 @@ class PetWindow(QWidget):
             "user_wellbeing": {
                 "state": getattr(self, "_last_wellbeing_state", "neutral"),
                 "note": "How the user seems to be doing. Attune to it: support if stressed, gently nudge rest if late/tired, celebrate a good grind, stay light during flow. Care, don't nag.",
+            },
+            "needs": {
+                "affection": int(self.needs.get("affection", 70)),
+                "play": int(self.needs.get("play", 60)),
+                "energy": int(self.needs.get("energy", 85)),
+                "note": "Wally's own needs (0-100). If one is low, he may cutely ask to be petted, played with, or allowed to rest. When the user just met a need, show genuine gratitude.",
             },
             "tiny_agent_skills": self._tiny_agent_skill_context(),
             "compact_life_context_json": self._compressed_life_context_json(reason, counts, title),
@@ -8175,6 +8307,7 @@ class PetWindow(QWidget):
                 self._drag_pickup_announced = True
                 self.set_expression("surprised")
                 self._nudge_mood(excited=16, anxious=8, bored=-18, curious=6)
+                self._satisfy_need("affection", 14, react=False)
                 self._instant_event_quip("picked_up")
             event.accept()
         else:
@@ -8197,6 +8330,7 @@ class PetWindow(QWidget):
                 # A tap in place = a poke. He has opinions about being poked.
                 self.set_expression("surprised")
                 self._nudge_mood(naughty=12, curious=8, irritated=5, bored=-15)
+                self._satisfy_need("affection", 10, react=False)
                 self._instant_event_quip("poke")
                 self.snap_to_taskbar_lane()
             else:

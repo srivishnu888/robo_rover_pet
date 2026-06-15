@@ -72,6 +72,10 @@ tone every time (sarcastic / funny / supportive / curious / excited / naughty / 
 a phrase from recent context. Body language lives in the body keys, NEVER in b — don't describe
 eyes, hands, eyebrows, antenna, posture, or actions in words.
 
+If typed_text is present, the user is literally typing that right now — riff on its CONTENT with a
+witty, sarcastic, or warm one-liner (or a tiny acknowledgement). It is NOT speech to you; never
+echo their words back verbatim, never read it aloud, never mention passwords or secrets.
+
 emo: ALWAYS set a fitting emoji name (this is your floating mood bubble). Pick from: heart,
 heartbreak, sparkle, star, excited, proud, cool, smug, laugh, giggle, wink, blush, curious,
 think, idea, wow, shock, nervous, pleading, tear, angry, frustrated, tired, bored, cozy, naughty,
@@ -136,7 +140,7 @@ REACTION_SCHEMA: Dict[str, object] = {
 # budget we drop *whole* low-priority keys from the end, so the model never receives a
 # JSON object that was sliced mid-token (the previous behavior corrupted world state).
 _REACTION_CONTEXT_PRIORITY = [
-    "r", "creative_intent", "user_wellbeing", "goal", "act", "expr", "world", "activity", "pending_event",
+    "r", "creative_intent", "user_wellbeing", "needs", "typed_text", "goal", "act", "expr", "world", "activity", "pending_event",
     "user_instruction", "screen", "scene", "media", "window",
     "mood", "mood_top", "drive", "life_memory", "memory",
     "inner_thought_feed", "speech_max_words", "tiny_agent_skills",

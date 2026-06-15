@@ -61,6 +61,17 @@ class PetMemoryStore:
         rel = self._data.get("relationship", {})
         return rel if isinstance(rel, dict) else {}
 
+    def get_needs(self) -> Dict[str, float]:
+        needs = self._data.get("needs", {})
+        out: Dict[str, float] = {}
+        if isinstance(needs, dict):
+            for key, value in needs.items():
+                try:
+                    out[str(key)] = float(value)
+                except (TypeError, ValueError):
+                    continue
+        return out
+
     # ---------------------------------------------------------- running gags
     def get_gags(self) -> List[str]:
         gags = self._data.get("gags", [])
@@ -193,6 +204,7 @@ class PetMemoryStore:
         recent_pet_lines: List[str],
         moods: Dict[str, float],
         lines_spoken_delta: int = 0,
+        needs: Optional[Dict[str, float]] = None,
         force: bool = False,
         min_interval_seconds: float = 20.0,
     ) -> None:
@@ -220,6 +232,7 @@ class PetMemoryStore:
             # Preserve accumulated long-term state (gags / learned habits) across saves.
             "gags": self.get_gags(),
             "user_patterns": self._data.get("user_patterns", {}),
+            "needs": {k: round(float(v), 1) for k, v in (needs or self.get_needs()).items()},
         }
         try:
             tmp = self.path.with_suffix(".json.tmp")

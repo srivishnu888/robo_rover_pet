@@ -276,6 +276,46 @@ _POOLS: Dict[str, List[str]] = {
         "Streak: {n} days! Unstoppable, us.",
         "{n} straight days. I'm basically yours.",
     ],
+
+    # --- Care / reciprocity: Wally's own needs, and gratitude when you meet them ---
+    "want_affection": [
+        "Psst... pet me? Just a little?",
+        "Attention levels low. Please refill.",
+        "Notice me. I'm being adorable on purpose.",
+        "I could use a tiny bit of love.",
+        "Hey. Hi. Hello. Look at me?",
+    ],
+    "want_play": [
+        "I'm bored. Play with me?",
+        "Can we do something fun? Please?",
+        "Ball? Ball. Ball! Right now?",
+        "My fun tank is on empty.",
+        "Entertain your rover, kind human.",
+    ],
+    "want_rest": [
+        "Running low... tiny nap soon?",
+        "Battery sleepy. Recharge time?",
+        "Yawn. This rover needs a moment.",
+        "Low power. Send cozy vibes.",
+    ],
+    "thanks_affection": [
+        "Ahh, that recharged my whole heart.",
+        "Yes! That's the good stuff.",
+        "Affection received. I'm thriving now.",
+        "Okay I love you. Don't tell anyone.",
+        "Best human. Verified. Certified.",
+    ],
+    "thanks_play": [
+        "That was the BEST. Again sometime?",
+        "Fun tank: refilled! You're elite.",
+        "Whee! I really needed that.",
+        "Ten out of ten. Would play again.",
+    ],
+    "thanks_rest": [
+        "Mmm, much better. Thank you.",
+        "Recharged! Ready for chaos again.",
+        "Ahh. Power restored. I'm new.",
+    ],
 }
 
 # Mood-colored ambient lines so his idle chatter MATCHES his face. Selected when a
