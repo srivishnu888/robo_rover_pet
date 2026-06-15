@@ -2643,7 +2643,7 @@ class PetWindow(QWidget):
         self._last_wellbeing_state = "neutral"
         # Co-watch mode: when the user is watching video, Wally sits at the TV and
         # quietly comments along every few minutes instead of disturbing them.
-        self._cowatch_enabled = self.store.boolean("pet/cowatch_enabled", False)
+        self._cowatch_enabled = self.store.boolean("pet/cowatch_enabled", True)
         self._cowatch_active = False
         self._cowatch_since = 0.0
         self._last_cowatch_comment_at = 0.0
@@ -5489,7 +5489,7 @@ class PetWindow(QWidget):
         # Require the video to be sustained so brief clips don't trigger a sit-down.
         if not self._cowatch_since:
             self._cowatch_since = now
-        if now - self._cowatch_since < 25:
+        if now - self._cowatch_since < 12:
             return False
         # Don't hijack a high-priority drama (EVA) or an in-progress travel.
         if self.current_action == "chase_eva" and self.debris_overlay.eva_visible:
@@ -5510,6 +5510,10 @@ class PetWindow(QWidget):
             self._tv_break_duration_seconds = 90.0
             self._set_current_goal_item(self._goal_item("co-watch with the human", "watch_tv", "tv_sofa", "cowatch", priority=8), lock_seconds=90.0)
             self._apply_reaction_action("watch_tv", 3, "tv_sofa")
+            # Immediate visible feedback so you can tell co-watch armed.
+            if now - self._last_spoken_bubble_at > 6:
+                self.show_bubble(random.choice(["Ooh, what are we watching? 🍿", "Movie time! Scooch over.", "Co-watch mode, engaged. 🍿"]), 5200, source="static")
+                self._last_spoken_bubble_at = now
             return True
         # Still walking over to the TV.
         if self.current_action == "watch_tv" and self.target_point is not None:
@@ -8781,7 +8785,13 @@ def infer_media_hint(title: str) -> str:
         return "youtube"
     if "netflix" in t:
         return "netflix"
-    if any(word in t for word in ["prime video", "disney+", "hulu", "max", "video", "player"]):
+    if any(word in t for word in [
+        "prime video", "disney+", "disney plus", "hulu", "hotstar", "hbo", "max",
+        "vimeo", "twitch", "crunchyroll", "plex", "jellyfin", "vlc media player",
+        "vlc", "mpv", "mpc-hc", "potplayer", "kodi", "apple tv", "peacock", "video",
+        "player", "- watch", "watching", "movie", "episode", "ep.", "s01", "s02",
+        ".mkv", ".mp4", ".avi", "1080p", "720p",
+    ]):
         return "video_player"
     if any(word in t for word in ["chrome", "edge", "firefox", "safari"]):
         return "browser"
