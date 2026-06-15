@@ -2363,6 +2363,7 @@ class ActivityMonitor:
         self.listener_error = ""
         self.typed_buffer = ""
         self.last_typed_excerpt = ""
+        self.last_type_time = 0.0
         self.word_count = 0
         self._lock = threading.Lock()
         self._listeners_started = False
@@ -2393,10 +2394,20 @@ class ActivityMonitor:
             clicks = self.click_count
             scrolls = self.scroll_count
             words = self.word_count
-            # Send the last ~30 typed words so Wally can riff on the actual content.
-            typed_excerpt = " ".join(self.typed_buffer.split()[-30:])[-220:]
-            if typed_excerpt.strip():
-                self.last_typed_excerpt = typed_excerpt
+            now_ts = time.time()
+            since_typed = now_ts - self.last_type_time if self.last_type_time else 1e9
+            # Send the last ~30 typed words so Wally can riff on the actual content,
+            # but only while it is FRESH. Stale text is cleared so he doesn't fixate
+            # on something the user typed many minutes ago.
+            if since_typed <= 20.0:
+                typed_excerpt = " ".join(self.typed_buffer.split()[-30:])[-220:]
+                if typed_excerpt.strip():
+                    self.last_typed_excerpt = typed_excerpt
+            else:
+                typed_excerpt = ""
+            if since_typed > 45.0:
+                self.last_typed_excerpt = ""
+                self.typed_buffer = ""
             self.key_count = 0
             self.click_count = 0
             self.scroll_count = 0
@@ -2431,6 +2442,7 @@ class ActivityMonitor:
                 with self._lock:
                     self.key_count += 1
                     self.last_input_time = time.time()
+                    self.last_type_time = self.last_input_time
                     try:
                         char = getattr(_key, "char", None)
                     except Exception:
@@ -4386,7 +4398,15 @@ class PetWindow(QWidget):
         the CONTENT — witty, sarcastic, or a warm acknowledgement. Privacy-guarded."""
         if not self.cfg.screen_awareness_enabled:
             return None
-        text = str(counts.get("typed_excerpt") or counts.get("recent_typed_excerpt") or "").strip()
+        # Only the FRESH excerpt — never the persistent one — so he doesn't keep
+        # bringing up something typed minutes ago. Also require recent activity.
+        try:
+            idle = float(counts.get("idle_seconds", 999))
+        except (TypeError, ValueError):
+            idle = 999.0
+        if idle > 12.0:
+            return None
+        text = str(counts.get("typed_excerpt") or "").strip()
         if len(text) < 6 or self._looks_sensitive_typing(window, text):
             return None
         return {
@@ -6011,6 +6031,11 @@ class PetWindow(QWidget):
         window_changed = bool(current_window and previous_window and current_window != previous_window and now - self._last_window_event_at > 2.0)
         if current_window and current_window != previous_window:
             self._last_seen_window_title = current_window
+            # Moving to a new app = new context. Drop the old typed buffer so he
+            # doesn't keep riffing on what was typed in the previous window.
+            with self.activity_monitor._lock:
+                self.activity_monitor.typed_buffer = ""
+                self.activity_monitor.last_typed_excerpt = ""
             # Quietly learn the user's habits (which apps, what time) so Wally grows
             # familiar over days and can reference patterns naturally.
             store = getattr(self, "memory_store", None)
