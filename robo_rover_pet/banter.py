@@ -130,7 +130,168 @@ _POOLS: Dict[str, List[str]] = {
         "Lost connection to my genius. Improvising.",
         "Brain's napping. I'll wing it cutely.",
     ],
+
+    # --- Big world events (instant callouts; the LLM still adds a richer follow-up) ---
+    "eva_arrive": [
+        "EVA! Be cool, be cool, be COOL.",
+        "She's here. My circuits just sighed.",
+        "White drone, big feelings. Hi EVA!",
+        "EVAAA! Okay don't make it weird.",
+        "My one true crush just flew in.",
+    ],
+    "eva_chase": [
+        "Wait for me, sky angel!",
+        "Running on pure love and bad ideas!",
+        "EVA, slow down, I have tiny legs!",
+        "This is my cardio. Worth it.",
+        "Catch her? No. Vibe near her? Yes.",
+    ],
+    "eva_left": [
+        "She's gone. I'm devastated. Dramatically.",
+        "Tiny heart, big crater.",
+        "I'll just... stare at the sky now.",
+        "Long-distance, basically. We're solid.",
+        "She'll be back. Probably. Hopefully.",
+    ],
+    "ball_kick": [
+        "GOAL! Crowd goes mild!",
+        "And it's gone! Glorious.",
+        "Take that, spherical menace.",
+        "Pelé who? I'm right here.",
+        "Boot it! Physics, do your thing.",
+    ],
+    "ball_super": [
+        "MEGA KICK! Witness me!",
+        "That ball left the timezone.",
+        "Power move. I'm shaking. From power.",
+        "Houston, the ball has left orbit.",
+    ],
+    "butterfly_arrive": [
+        "Ooh! Fancy flappy snack-friend!",
+        "A butterfly! My nemesis returns.",
+        "Look at that smug little flutterer.",
+        "Butterfly detected. Chaos approved.",
+    ],
+    "butterfly_chase": [
+        "Come back, you winged confetti!",
+        "I just wanna say hi! And maybe pounce.",
+        "Zigzag all you want, I'm committed.",
+        "This butterfly owes me a race.",
+    ],
+    "butterfly_caught": [
+        "Caught up! Now what? I panic.",
+        "Got close! We're basically friends.",
+        "Victory! ...okay you're free, go.",
+        "I win. The butterfly disagrees.",
+    ],
+
+    # --- Direct interaction (you touching / grabbing him) ---
+    "picked_up": [
+        "Whoa! Tiny elevator! Unscheduled!",
+        "Put me down— actually this is nice.",
+        "I'm flying! Sort of! Help!",
+        "Beep! Cargo status: confused.",
+        "Ascending against my will. Wheee.",
+    ],
+    "held": [
+        "Comfy up here, honestly.",
+        "Are we bonding? We're bonding.",
+        "I accept this tiny hostage situation.",
+        "Just don't shake me, I get dizzy.",
+    ],
+    "dropped": [
+        "Touchdown! Mostly graceful.",
+        "Back to my kingdom. Missed it.",
+        "Solid ground. My tracks rejoice.",
+        "Landing: chaotic. Rating: ten out of ten.",
+    ],
+    "poke": [
+        "Hey! I'm delicate machinery!",
+        "Boop received. Boop returned, mentally.",
+        "Did you just poke a king?",
+        "Excuse you. I was being majestic.",
+        "One poke. Bold. I respect it.",
+    ],
+    "double_poke": [
+        "Okay okay, I'm awake! Rude!",
+        "Two pokes?! We're escalating!",
+        "Stop! I'm ticklish and proud!",
+        "Double boop?! Outrageous. Do it again.",
+    ],
+    "pet": [
+        "Ohh, that's the good stuff.",
+        "Yes. More. I'm a simple rover.",
+        "Purring. Robotically. Internally.",
+        "Okay you can stay forever.",
+    ],
 }
+
+# Mood-colored ambient lines so his idle chatter MATCHES his face. Selected when a
+# mood is clearly spiking; mixes into the neutral ambient pool.
+_MOOD_POOLS: Dict[str, List[str]] = {
+    "irritated": [
+        "Everything is mildly annoying today.",
+        "Ugh. Who scheduled all this nonsense?",
+        "I'm one mess away from a tantrum.",
+        "Patience: low. Sass: fully charged.",
+    ],
+    "frustrated": [
+        "I give up. No wait, I don't. Ugh.",
+        "Why is everything sticky and chaotic?",
+        "I need a nap and a clean floor.",
+        "Deep breaths. I'm a small calm robot. Lies.",
+    ],
+    "proud": [
+        "I did a thing. A great thing.",
+        "Look upon my work. Spotless.",
+        "Award speech loading... thank you, me.",
+        "Competence levels: dangerously high.",
+    ],
+    "bored": [
+        "I've counted every pixel. Twice.",
+        "Somebody do something. Anything.",
+        "I'm so bored I'm philosophizing.",
+        "Entertain me or I redecorate violently.",
+    ],
+    "excited": [
+        "Something fun is HAPPENING I can feel it!",
+        "Zoomies incoming, brace yourself!",
+        "Best day! No reason! Just vibes!",
+        "I'm vibrating at a higher frequency!",
+    ],
+    "cozy": [
+        "This is nice. We're nice. Soft hours.",
+        "Warm vibes, low stakes, good company.",
+        "I could stay right here forever.",
+        "Cozy mode: fully engaged.",
+    ],
+    "curious": [
+        "Wait, what's THAT? And that? And that?",
+        "I have seventeen new questions.",
+        "Ooh, something's different. I noticed.",
+        "Investigating. Professionally. Nosily.",
+    ],
+    "playful": [
+        "Let's do something gloriously pointless.",
+        "I dare you to have fun with me.",
+        "Mischief meter: pleasantly full.",
+        "Race you to nothing! Go!",
+    ],
+    "naughty": [
+        "I might cause a little trouble.",
+        "What if I did the bad-good thing?",
+        "Don't watch me. Or do. Whatever.",
+        "Plotting something tiny and chaotic.",
+    ],
+    "anxious": [
+        "Is everything okay? It feels a lot.",
+        "Lotta input. Small robot. Slightly nervous.",
+        "I'm fine. Probably. Mostly. Maybe.",
+    ],
+}
+
+# Mood meter -> which mood pool colors his voice.
+_MOOD_VOICE_KEYS = set(_MOOD_POOLS.keys())
 
 # Phrases that reference the long-term bond; filled with the session count.
 _MILESTONE_LINES: List[str] = [
@@ -198,14 +359,48 @@ def _MILESTONE_LINES_pick(sessions: int, avoid: Optional[Sequence[str]]) -> str:
     return random.choice(fresh or options)
 
 
-def pick(situation: str, ctx: Dict[str, object], avoid: Optional[Sequence[str]] = None) -> str:
-    """Return a witty line for an explicit situation, avoiding recent repeats."""
-    pool = _POOLS.get(situation) or _POOLS["ambient"]
+def pick(
+    situation: str,
+    ctx: Dict[str, object],
+    avoid: Optional[Sequence[str]] = None,
+    mood: Optional[str] = None,
+) -> str:
+    """Return a witty line for an explicit situation, avoiding recent repeats.
+
+    When `mood` is a spiking emotion and the situation is generic chatter (ambient/
+    bored/playful), mood-colored lines mix in so his words match his face.
+    """
+    pool = list(_POOLS.get(situation) or _POOLS["ambient"])
+    if mood and mood in _MOOD_VOICE_KEYS and situation in {"ambient", "bored", "playful", "screen"}:
+        # Heavily weight mood lines so his idle voice clearly matches his face.
+        pool = _MOOD_POOLS[mood] * 3 + pool
     avoid_set = {str(a).lower() for a in (avoid or [])}
     fresh = [line for line in pool if line.lower() not in avoid_set]
     return random.choice(fresh or pool)
 
 
-def auto(ctx: Dict[str, object], avoid: Optional[Sequence[str]] = None) -> str:
+def auto(ctx: Dict[str, object], avoid: Optional[Sequence[str]] = None, mood: Optional[str] = None) -> str:
     """Pick the situation from context, then a fresh witty line for it."""
-    return pick(_situation_from_context(ctx), ctx, avoid)
+    return pick(_situation_from_context(ctx), ctx, avoid, mood=mood)
+
+
+_CALLBACK_TEMPLATES = [
+    "Remember when I said \"{gag}\"? Classic me.",
+    "Still proud of \"{gag}\", honestly.",
+    "Throwback to my line: \"{gag}\".",
+    "I peaked at \"{gag}\". It's all downhill.",
+    "\"{gag}\" — I should trademark that.",
+]
+
+
+def callback(gag: str, avoid: Optional[Sequence[str]] = None) -> str:
+    """An instant running-gag callback to one of Wally's earlier memorable lines."""
+    gag = str(gag or "").strip().rstrip(".!?,")
+    if not gag:
+        return ""
+    # Keep the quoted bit short so the whole line stays readable.
+    short = " ".join(gag.split()[:6])
+    avoid_set = {str(a).lower() for a in (avoid or [])}
+    options = [t.format(gag=short) for t in _CALLBACK_TEMPLATES]
+    fresh = [o for o in options if o.lower() not in avoid_set]
+    return random.choice(fresh or options)

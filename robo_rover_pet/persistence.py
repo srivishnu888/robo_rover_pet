@@ -61,6 +61,58 @@ class PetMemoryStore:
         rel = self._data.get("relationship", {})
         return rel if isinstance(rel, dict) else {}
 
+    # ---------------------------------------------------------- running gags
+    def get_gags(self) -> List[str]:
+        gags = self._data.get("gags", [])
+        return [str(x) for x in gags] if isinstance(gags, list) else []
+
+    def add_gag(self, line: str) -> None:
+        """Remember a memorable/funny line so Wally can call back to it later."""
+        line = str(line or "").strip()
+        if len(line) < 8 or len(line) > 90:
+            return
+        gags = self.get_gags()
+        low = line.lower()
+        if any(low == g.lower() for g in gags):
+            return
+        gags.append(line)
+        self._data["gags"] = gags[-24:]
+
+    def random_gag(self) -> str:
+        import random as _r
+        gags = self.get_gags()
+        return _r.choice(gags) if gags else ""
+
+    # ------------------------------------------------------- user patterns
+    def note_pattern(self, window_title: str, daypart: str) -> None:
+        """Quietly learn the user's habits: which apps, what time of day."""
+        patterns = self._data.get("user_patterns")
+        if not isinstance(patterns, dict):
+            patterns = {"windows": {}, "dayparts": {}}
+        windows = patterns.setdefault("windows", {})
+        dayparts = patterns.setdefault("dayparts", {})
+        key = str(window_title or "").strip()[:48]
+        if key:
+            windows[key] = int(windows.get(key, 0)) + 1
+            if len(windows) > 60:  # keep only the busiest apps
+                patterns["windows"] = dict(sorted(windows.items(), key=lambda kv: kv[1], reverse=True)[:40])
+        if daypart:
+            dayparts[daypart] = int(dayparts.get(daypart, 0)) + 1
+        self._data["user_patterns"] = patterns
+
+    def top_patterns(self) -> Dict[str, object]:
+        patterns = self._data.get("user_patterns", {})
+        if not isinstance(patterns, dict):
+            return {}
+        windows = patterns.get("windows", {})
+        dayparts = patterns.get("dayparts", {})
+        top_windows = sorted(windows.items(), key=lambda kv: kv[1], reverse=True)[:3] if isinstance(windows, dict) else []
+        top_daypart = max(dayparts.items(), key=lambda kv: kv[1])[0] if isinstance(dayparts, dict) and dayparts else ""
+        return {
+            "favorite_apps": [w for w, _ in top_windows],
+            "usual_time": top_daypart,
+        }
+
     def relationship_context(self) -> Dict[str, object]:
         """Compact, model-friendly view of the long-term bond, for the brain context."""
         rel = self.relationship()
@@ -71,13 +123,30 @@ class PetMemoryStore:
                 days_known = max(0, (datetime.now() - datetime.fromisoformat(first_seen)).days)
             except Exception:
                 days_known = 0
+        sessions = int(rel.get("sessions", 0) or 0)
         return {
-            "sessions": int(rel.get("sessions", 0) or 0),
+            "sessions": sessions,
             "days_known": days_known,
             "minutes_together": int(rel.get("total_minutes", 0) or 0),
             "lines_spoken_total": int(rel.get("lines_spoken", 0) or 0),
-            "returning_friend": int(rel.get("sessions", 0) or 0) > 1,
+            "returning_friend": sessions > 1,
+            "bond_stage": self.bond_stage(),
+            "patterns": self.top_patterns(),
         }
+
+    def bond_stage(self) -> str:
+        """How close Wally feels, so his tone can grow from shy to old-friend."""
+        rel = self.relationship()
+        sessions = int(rel.get("sessions", 0) or 0)
+        if sessions <= 1:
+            return "just_met"
+        if sessions <= 4:
+            return "warming_up"
+        if sessions <= 10:
+            return "friends"
+        if sessions <= 25:
+            return "close_friends"
+        return "inseparable"
 
     def mark_session_start(self) -> None:
         rel = dict(self.relationship())
@@ -120,6 +189,9 @@ class PetMemoryStore:
             "recent_pet_lines": list(recent_pet_lines)[-24:],
             "moods": {k: round(float(v), 1) for k, v in moods.items()},
             "relationship": rel,
+            # Preserve accumulated long-term state (gags / learned habits) across saves.
+            "gags": self.get_gags(),
+            "user_patterns": self._data.get("user_patterns", {}),
         }
         try:
             tmp = self.path.with_suffix(".json.tmp")

@@ -4298,6 +4298,27 @@ class PetWindow(QWidget):
             self._remember_pet_line(line)
             self.set_expression("excited")
 
+    def _instant_event_quip(self, situation: str, min_gap: float = 2.2, duration_ms: int = 6500) -> None:
+        """Fire an instant in-character callout for a big event (EVA, ball, butterfly,
+        being poked/grabbed). The LLM follow-up, if any, upgrades this bubble."""
+        now = time.time()
+        if now - float(getattr(self, "_last_event_quip_at", 0.0)) < min_gap:
+            return
+        line = banter.pick(situation, self._banter_context(), avoid=self.recent_pet_lines[-10:], mood=self._dominant_mood())
+        if line:
+            self.show_bubble(line, duration_ms, source="static")
+            self._remember_pet_line(line)
+            self._last_event_quip_at = now
+
+    def _maybe_record_gag(self, line: str) -> None:
+        """Occasionally remember one of Wally's own good lines as a future running gag."""
+        store = getattr(self, "memory_store", None)
+        if store is None or not line:
+            return
+        words = line.split()
+        if 3 <= len(words) <= 12 and random.random() < 0.22:
+            store.add_gag(line)
+
     def _banter_context(self) -> Dict[str, object]:
         """Live state for the wit engine so instant lines match the real moment."""
         store = getattr(self, "memory_store", None)
@@ -4320,15 +4341,23 @@ class PetWindow(QWidget):
         # other) so this never feels like a canned filler.
         ctx = self._banter_context()
         avoid = self.recent_pet_lines[-10:]
+        mood = self._dominant_mood()
         if "startup" in reason or "intro" in reason:
             return banter.greeting(ctx, avoid=avoid)
         if "screen" in reason or "scene" in reason:
-            return banter.pick("screen", ctx, avoid=avoid)
+            return banter.pick("screen", ctx, avoid=avoid, mood=mood)
         if "overload" in reason or "work" in reason:
             return banter.pick("overwhelmed", ctx, avoid=avoid)
         if "typing" in reason:
             return banter.pick("rapid_typing", ctx, avoid=avoid)
-        return banter.auto(ctx, avoid=avoid)
+        # Occasionally call back to an earlier memorable line (a running gag).
+        store = getattr(self, "memory_store", None)
+        if store is not None and "ambient" in reason and random.random() < 0.18:
+            gag = store.random_gag()
+            line = banter.callback(gag, avoid=avoid) if gag else ""
+            if line:
+                return line
+        return banter.auto(ctx, avoid=avoid, mood=mood)
 
     def show_bubble(self, text: str, duration_ms: int = 7000, source: str = "static") -> None:
         # Keep bubbles readable; very short durations made lines vanish mid-read.
@@ -4600,10 +4629,13 @@ class PetWindow(QWidget):
         )
         self._play_whoa_sound()
         self.set_expression("excited")
+        self._nudge_mood(excited=22 if super_kick else 12, playful=14, proud=10 if super_kick else 4, bored=-18)
         self._apply_body_controls({"antenna": "wiggle", "eyes": "basketball", "eyebrow": "mischief", "emoji": random.choice(["🏀", "⚡", "😎", "🤭"]), "left_arm": "cheer", "right_arm": "point"})
         self.current_action = "pause"
         self.target_point = None
         self.pause_until = time.time() + (2.4 if super_kick else random.uniform(1.4, 3.0))
+        # Instant commentary; the LLM (when it comments) upgrades this line.
+        self._instant_event_quip("ball_super" if super_kick else "ball_kick")
         event = {"did": "kick_ball", "reason": reason, "kick": kick, "ball": self.debris_overlay.ball_status(), "super": super_kick}
         self._remember_action("kicked_ball", event)
         if resume_after:
@@ -4810,17 +4842,35 @@ class PetWindow(QWidget):
         items = sorted(self.moods.items(), key=lambda kv: kv[1], reverse=True)[:limit]
         return ", ".join(f"{k}:{int(v)}" for k, v in items)
 
+    # Emotional resting state; drift returns here so Wally never gets stuck in one mood.
+    _MOOD_BASELINES = {
+        "bored": 30.0, "curious": 48.0, "excited": 18.0, "anxious": 8.0,
+        "irritated": 10.0, "frustrated": 6.0, "playful": 58.0, "cozy": 16.0, "proud": 10.0,
+        "naughty": 18.0, "sarcastic": 14.0, "encouraging": 22.0,
+    }
+
+    def _dominant_mood(self, min_spike: float = 8.0) -> Optional[str]:
+        """The mood spiking most above its baseline right now, or None if calm.
+
+        Used to color his voice so words match his face. Only moods the banter wit
+        engine can speak in are returned."""
+        speakable = {"irritated", "frustrated", "proud", "bored", "excited", "cozy", "curious", "playful", "naughty", "anxious"}
+        best_key, best_dev = None, min_spike
+        for key, base in self._MOOD_BASELINES.items():
+            if key not in speakable:
+                continue
+            dev = self.moods.get(key, base) - base
+            if dev > best_dev:
+                best_key, best_dev = key, dev
+        return best_key
+
     def _update_mood_model(self) -> None:
         now = time.time()
         dt = max(0.15, min(4.0, now - self._last_mood_update_at))
         self._last_mood_update_at = now
         debris_count = self.debris_overlay.item_count() if self.cfg.debris_enabled else 0
         # Gentle drift toward baseline so Wally does not get stuck in one emotional state.
-        baselines = {
-            "bored": 30.0, "curious": 48.0, "excited": 18.0, "anxious": 8.0,
-            "irritated": 10.0, "frustrated": 6.0, "playful": 58.0, "cozy": 16.0, "proud": 10.0,
-            "naughty": 18.0, "sarcastic": 14.0, "encouraging": 22.0,
-        }
+        baselines = self._MOOD_BASELINES
         for key, base in baselines.items():
             self.moods[key] = self._clamp_mood(self.moods.get(key, base) + (base - self.moods.get(key, base)) * 0.015 * dt)
 
@@ -5343,10 +5393,13 @@ class PetWindow(QWidget):
                 self.current_action = "pause"
                 self.pause_until = time.time() + random.uniform(2.5, 5.0)
                 self._remember_event("caught_up_to_butterfly", text="butterfly chase", data={"did": "caught_butterfly_moment", "butterfly": self.debris_overlay.butterfly_status()})
+                self._nudge_mood(proud=12, excited=10, playful=8, bored=-12)
                 if time.time() < getattr(self, "_eva_recovery_until", 0.0):
                     self._eva_recovery_until = 0.0
                     self._nudge_mood(playful=12, excited=8, frustrated=-10, anxious=-5, curious=6)
                     self.show_bubble("Flutter therapy worked.", 6200, source="static")
+                else:
+                    self._instant_event_quip("butterfly_caught")
                 if self._resume_after_butterfly_chase is not None:
                     QTimer.singleShot(int(max(900, (self.pause_until - time.time()) * 1000 + 300)), self._resume_goal_after_butterfly_chase)
                 if self.cfg.ai_reactions_enabled and not self._thread_running(self.reaction_worker):
@@ -5650,6 +5703,11 @@ class PetWindow(QWidget):
         window_changed = bool(current_window and previous_window and current_window != previous_window and now - self._last_window_event_at > 2.0)
         if current_window and current_window != previous_window:
             self._last_seen_window_title = current_window
+            # Quietly learn the user's habits (which apps, what time) so Wally grows
+            # familiar over days and can reference patterns naturally.
+            store = getattr(self, "memory_store", None)
+            if store is not None:
+                store.note_pattern(current_window, self._local_time_context().get("daypart", ""))
 
         workload_event = self._update_workload_trash(keys, scrolls, words, typed_excerpt, current_window, now)
         if workload_event and workload_event.get("kind") == "hard_work_trash_overload":
@@ -5771,7 +5829,7 @@ class PetWindow(QWidget):
         else:
             should_quip = now - last_quip > 9.0
         if should_quip:
-            line = banter.pick(situation, self._banter_context(), avoid=self.recent_pet_lines[-10:])
+            line = banter.pick(situation, self._banter_context(), avoid=self.recent_pet_lines[-10:], mood=self._dominant_mood())
             if line:
                 self.show_bubble(line, 6500, source="static")
                 self._remember_pet_line(line)
@@ -5819,12 +5877,22 @@ class PetWindow(QWidget):
                 recent_chat.append({"at": datetime.now().strftime("%H:%M"), key: shorten_for_bubble(str(item.get("content", "")), max_len=70)})
         store = getattr(self, "memory_store", None)
         relationship = store.relationship_context() if store is not None else {}
+        running_gags = store.get_gags()[-6:] if store is not None else []
         return {
             "timeline": recent_events[-10:],
             "recent_rivet_said": recent_lines,
             "recent_chat": recent_chat,
             "relationship": relationship,
             "relationship_note": "Long-term bond with this user; reference it naturally when it fits, never robotically.",
+            "running_gags": running_gags,
+            "running_gags_note": "Wally's own past memorable lines. Occasionally call back to one for an inside-joke feel.",
+            "bond_tone": {
+                "just_met": "a little shy and curious, light teasing",
+                "warming_up": "friendlier, more teasing, starting inside jokes",
+                "friends": "comfortable, playful roasts, callbacks",
+                "close_friends": "warm best-friend energy, lots of callbacks and inside jokes",
+                "inseparable": "old-soul companion who knows the user deeply",
+            }.get(str(relationship.get("bond_stage", "")), "friendly"),
             "current_goal": self.current_goal[:48],
             "last_action_done": self.current_action,
             "play_quotas": {
@@ -6177,7 +6245,11 @@ class PetWindow(QWidget):
         self.target_point = self._eva_target_point()
         self.pause_until = 0.0
         self._apply_body_controls({"antenna": "heart", "eyes": "up", "eyebrow": "love", "emoji": "💛", "left_arm": "cheer", "right_arm": "wave"})
-        self.show_bubble("EVAAA! 💛", 6500, source="tool" if force else "static")
+        self._nudge_mood(excited=30, playful=18, bored=-25, cozy=8)
+        eva_hello = banter.pick("eva_arrive", self._banter_context(), avoid=self.recent_pet_lines[-10:])
+        self.show_bubble(eva_hello or "EVAAA! 💛", 6500, source="tool" if force else "static")
+        self._remember_pet_line(eva_hello)
+        self._last_event_quip_at = time.time()
         if self.cfg.ai_reactions_enabled and not self._thread_running(self.reaction_worker) and time.time() - self._last_eva_event_llm_at > 8:
             self._last_eva_event_llm_at = time.time()
             self._pending_activity_note = {"kind": "eva_flyby", "eva": self.debris_overlay.eva_status(), "tone_choices": ["lovestruck", "excited", "funny", "dramatic"], "hint": "Wally is sprinting behind EVA and calling her name."}
@@ -6204,7 +6276,9 @@ class PetWindow(QWidget):
         self._apply_body_controls({"antenna": "droop", "eyes": "side", "eyebrow": "sad", "emoji": "💛", "left_arm": "shy", "right_arm": "shy"})
         self._remember_event("eva_flyby_missed", text="EVA gone", data={"did": "feel_bad_after_eva", "sad_seconds": round(self._eva_sad_until - time.time(), 1)})
         if not self.bubble_text:
-            self.show_bubble(random.choice(["EVA gone...", "Tiny heart dent.", "She flew away."]), 6500, source="static")
+            sad_line = banter.pick("eva_left", self._banter_context(), avoid=self.recent_pet_lines[-10:])
+            self.show_bubble(sad_line or "EVA gone...", 6500, source="static")
+            self._remember_pet_line(sad_line)
         if self.cfg.ai_reactions_enabled and not self._thread_running(self.reaction_worker) and time.time() - self._last_eva_event_llm_at > 8:
             self._last_eva_event_llm_at = time.time()
             self._pending_activity_note = {"kind": "eva_left_wally_sad", "tone_choices": ["soft", "dramatic", "funny", "heartbroken"], "hint": "Wally missed EVA and is sad for a few seconds."}
@@ -6243,11 +6317,15 @@ class PetWindow(QWidget):
         self._remember_event("butterfly_arrived", text="butterfly visible", data={"visible": True, "arrival_index": self._butterfly_arrival_seen})
         self._remember_action("butterfly_arrived", {"visible": True, "arrival_index": self._butterfly_arrival_seen})
         self.set_expression("curious")
+        self._nudge_mood(curious=18, excited=12, playful=10, bored=-15)
         self._apply_body_controls({"eyes": "butterfly", "eyebrow": "curious", "emoji": "🦋", "antenna": "perked"})
 
         if not self.bubble_text or time.time() - self._last_butterfly_ack_at > 18:
             self._last_butterfly_ack_at = time.time()
-            self.show_bubble(random.choice(["Tiny wings incoming 🦋", "Ohhh, sky raisin!", "Flutter visitor spotted!", "That bug has confidence."]), 7600, source="static")
+            ack = banter.pick("butterfly_arrive", self._banter_context(), avoid=self.recent_pet_lines[-10:])
+            self.show_bubble(ack or "Tiny wings incoming 🦋", 7600, source="static")
+            self._remember_pet_line(ack)
+            self._last_event_quip_at = time.time()
 
         # User clarified: this is a true per-arrival 40% chance, not "only on the 4th".
         critical_busy = self.current_action in {"clean", "go_bin", "chase_eva", "parachute", "fall", "listen", "talk_to_user"} and self.target_point is not None
@@ -6265,6 +6343,7 @@ class PetWindow(QWidget):
                 "arrival_seen": self._butterfly_arrival_seen,
                 "eva_recovery": bool(time.time() < getattr(self, "_eva_recovery_until", 0.0)),
             })
+            self._instant_event_quip("butterfly_chase")
             self._apply_reaction_action("chase_butterfly", 2, "butterfly")
         else:
             self._remember_event("butterfly_not_chased", text="watched butterfly", data={
@@ -6432,6 +6511,7 @@ class PetWindow(QWidget):
             self.show_bubble(bubble, 7800 + intensity * 800, source="ollama")
             self._last_spoken_bubble_at = time.time()
             self._remember_pet_line(bubble)
+            self._maybe_record_gag(bubble)
             if "scheduled_scene_check" in request_reason or "manual_screen_check" in request_reason:
                 self.last_screen_reaction_signature = self._normalize_pet_line(bubble)[:80]
         elif was_offline:
@@ -7954,6 +8034,8 @@ class PetWindow(QWidget):
             self.current_action = "chill"
             self.pause_until = time.time() + 1.2
             self._apply_body_controls({"eyes": "user", "eyebrow": "happy", "emoji": random.choice(["✨", "😎", "🪂"]), "left_arm": "cheer", "right_arm": "wave"})
+            self._nudge_mood(excited=10, proud=6, bored=-10)
+            self._instant_event_quip("dropped")
             self._remember_action("landed_after_drop", {"mode": "parachute" if self.fall_started_height else "fall", "height": int(self.fall_started_height)})
 
     def mousePressEvent(self, event: QMouseEvent) -> None:  # noqa: N802 - Qt override
@@ -7962,6 +8044,8 @@ class PetWindow(QWidget):
             self.drag_offset = global_pos(event) - self.frameGeometry().topLeft()
             self.drag_start_pos = self.pos()
             self.fall_mode = "none"
+            self._drag_press_time = time.time()
+            self._drag_pickup_announced = False
             self.set_expression("surprised")
             event.accept()
         else:
@@ -7970,6 +8054,12 @@ class PetWindow(QWidget):
     def mouseMoveEvent(self, event: QMouseEvent) -> None:  # noqa: N802 - Qt override
         if self.is_dragging and self.drag_offset is not None:
             self.move(global_pos(event) - self.drag_offset)
+            # Announce being lifted once he's clearly off the taskbar.
+            if not getattr(self, "_drag_pickup_announced", False) and self._height_above_taskbar_surface() > 46:
+                self._drag_pickup_announced = True
+                self.set_expression("surprised")
+                self._nudge_mood(excited=16, anxious=8, bored=-18, curious=6)
+                self._instant_event_quip("picked_up")
             event.accept()
         else:
             super().mouseMoveEvent(event)
@@ -7982,8 +8072,17 @@ class PetWindow(QWidget):
             screen = QApplication.screenAt(global_pos(event)) or QApplication.primaryScreen()
             lifted = self._height_above_taskbar_surface()
             threshold = (screen.geometry().height() * 0.30) if screen else 260
+            moved = abs(self.pos().x() - self.drag_start_pos.x()) + abs(self.pos().y() - self.drag_start_pos.y()) if self.drag_start_pos else 0
+            quick = time.time() - float(getattr(self, "_drag_press_time", 0.0)) < 0.35
             if lifted > 18:
+                # Dropped from a height: the witty landing line fires when he lands.
                 self._start_gravity_drop(high=lifted >= threshold)
+            elif quick and moved < 8:
+                # A tap in place = a poke. He has opinions about being poked.
+                self.set_expression("surprised")
+                self._nudge_mood(naughty=12, curious=8, irritated=5, bored=-15)
+                self._instant_event_quip("poke")
+                self.snap_to_taskbar_lane()
             else:
                 self.set_expression("happy")
                 self.snap_to_taskbar_lane()
@@ -7993,6 +8092,8 @@ class PetWindow(QWidget):
 
     def mouseDoubleClickEvent(self, event: QMouseEvent) -> None:  # noqa: N802 - Qt override
         if event.button() == Qt.LeftButton:
+            self._nudge_mood(playful=14, naughty=10, bored=-15)
+            self._instant_event_quip("double_poke", duration_ms=4200)
             self.open_chat()
             event.accept()
         else:
