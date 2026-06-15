@@ -70,6 +70,7 @@ from PySide6.QtWidgets import (
 )
 
 from .llm import DEFAULT_PERSONALITY, OllamaClient, OllamaConfig, OllamaError, compact_pet_sentence
+from .persistence import PetMemoryStore
 
 
 ORG_NAME = "LocalDesktopPets"
@@ -2614,6 +2615,24 @@ class PetWindow(QWidget):
             "encouraging": 22.0,
         }
         self._last_mood_update_at = time.time()
+
+        # Restore durable memory so Wally remembers prior sessions instead of waking
+        # up amnesiac every launch. Best-effort: a missing/corrupt file just starts fresh.
+        self.memory_store = PetMemoryStore(self.store.config_dir)
+        self.memory_store.load()
+        self.memory_store.mark_session_start()
+        self._lines_spoken_session = 0
+        restored_events = self.memory_store.get_action_memory()
+        if restored_events:
+            self.action_memory = restored_events[-32:]
+        restored_lines = self.memory_store.get_recent_pet_lines()
+        if restored_lines:
+            self.recent_pet_lines = restored_lines[-18:]
+            self.recent_pet_line_norms = [self._normalize_pet_line(x) for x in self.recent_pet_lines]
+        for key, value in self.memory_store.get_moods().items():
+            if key in self.moods:
+                self.moods[key] = self._clamp_mood(value)
+
         self._last_clean_decision_at = 0.0
         self._last_tantrum_at = 0.0
         self._last_joke_fact_at = 0.0
@@ -2690,6 +2709,13 @@ class PetWindow(QWidget):
         self.reminder_timer.setInterval(1000)
         self.reminder_timer.timeout.connect(self._reminder_tick)
         self.reminder_timer.start()
+
+        # Periodically snapshot durable memory so a crash/forced-quit still preserves
+        # the relationship and recent state (closeEvent also flushes on clean exit).
+        self.memory_save_timer = QTimer(self)
+        self.memory_save_timer.setInterval(30_000)
+        self.memory_save_timer.timeout.connect(self._save_persistent_memory)
+        self.memory_save_timer.start()
 
         self.ai_reaction_timer = QTimer(self)
         self.ai_reaction_timer.setSingleShot(True)
@@ -3018,6 +3044,14 @@ class PetWindow(QWidget):
 
     def reset_memory(self) -> None:
         self.chat_history.clear()
+        self.action_memory.clear()
+        self.recent_pet_lines.clear()
+        self.recent_pet_line_norms.clear()
+        self._lines_spoken_session = 0
+        store = getattr(self, "memory_store", None)
+        if store is not None:
+            store.clear()
+            store.mark_session_start()
         if self.chat_dialog:
             self.chat_dialog.append_pet("Memory reset. Fresh little rover brain ready.")
         self.show_bubble("Memory reset. Fresh start!", 2800)
@@ -3536,7 +3570,12 @@ class PetWindow(QWidget):
     def shutdown_workers(self) -> None:
         """Stop timers and QThreads before Qt destroys widgets during app shutdown."""
         self._shutdown_in_progress = True
-        for timer_name in ("animation_timer", "behavior_timer", "activity_timer", "reminder_timer", "ai_reaction_timer", "ai_heartbeat_timer", "butterfly_timer", "eva_timer", "bubble_timer"):
+        # Flush durable memory first so a clean exit always preserves the latest state.
+        try:
+            self._save_persistent_memory(force=True)
+        except Exception:
+            pass
+        for timer_name in ("animation_timer", "behavior_timer", "activity_timer", "reminder_timer", "memory_save_timer", "ai_reaction_timer", "ai_heartbeat_timer", "butterfly_timer", "eva_timer", "bubble_timer"):
             timer = getattr(self, timer_name, None)
             try:
                 if timer is not None:
@@ -4211,6 +4250,21 @@ class PetWindow(QWidget):
         self.recent_pet_line_norms.append(norm)
         self.recent_pet_lines = self.recent_pet_lines[-18:]
         self.recent_pet_line_norms = self.recent_pet_line_norms[-18:]
+        self._lines_spoken_session += 1
+
+    def _save_persistent_memory(self, force: bool = False) -> None:
+        store = getattr(self, "memory_store", None)
+        if store is None:
+            return
+        delta = self._lines_spoken_session
+        self._lines_spoken_session = 0
+        store.save(
+            action_memory=self.action_memory,
+            recent_pet_lines=self.recent_pet_lines,
+            moods=self.moods,
+            lines_spoken_delta=delta,
+            force=force,
+        )
 
     def _typed_context_interesting(self, typed: str, keys: int) -> bool:
         typed = (typed or "").strip()
@@ -5678,10 +5732,14 @@ class PetWindow(QWidget):
                 role = item.get("role")
                 key = "user_said" if role == "user" else "rivet_said"
                 recent_chat.append({"at": datetime.now().strftime("%H:%M"), key: shorten_for_bubble(str(item.get("content", "")), max_len=70)})
+        store = getattr(self, "memory_store", None)
+        relationship = store.relationship_context() if store is not None else {}
         return {
             "timeline": recent_events[-10:],
             "recent_rivet_said": recent_lines,
             "recent_chat": recent_chat,
+            "relationship": relationship,
+            "relationship_note": "Long-term bond with this user; reference it naturally when it fits, never robotically.",
             "current_goal": self.current_goal[:48],
             "last_action_done": self.current_action,
             "play_quotas": {
