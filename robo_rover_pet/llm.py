@@ -71,6 +71,86 @@ Fresh complete speech within configured word limit; never rely on truncation; fo
 """.strip()
 
 
+# Compact reaction keys the renderer understands. Enum-constraining the small model's
+# choices is far more reliable than normalizing free text after the fact.
+REACTION_ACTIONS = [
+    "", "pause", "roam", "inspect", "clean", "dump", "tv", "playtv", "chase",
+    "chase_eva", "mouse", "dizzy", "wave", "dance", "sing", "nap", "throw", "move", "kick",
+]
+REACTION_TARGETS = [
+    "current", "random", "left", "right", "debris", "pile", "bin", "tv",
+    "butterfly", "mouse", "screen", "ball",
+]
+REACTION_EXPRESSIONS = [
+    "happy", "curious", "sleepy", "soft", "surprised", "thinking", "talking", "scared",
+    "love", "excited", "watching", "cleaning", "proud", "error", "dizzy", "angry",
+    "irritated", "frustrated",
+]
+
+# JSON schema passed to Ollama's structured-output `format`. This makes malformed
+# JSON structurally impossible, so the regex salvage paths become a rare fallback
+# (kept only for models/runtimes that reject schema mode).
+REACTION_SCHEMA: Dict[str, object] = {
+    "type": "object",
+    "properties": {
+        "b": {"type": "string"},                               # speech
+        "a": {"type": "string", "enum": REACTION_ACTIONS},     # action
+        "t": {"type": "string", "enum": REACTION_TARGETS},     # target
+        "e": {"type": "string", "enum": REACTION_EXPRESSIONS}, # face
+        "brow": {"type": "string"},                            # eyebrows
+        "eye": {"type": "string"},                             # gaze
+        "l": {"type": "string"},                               # left hand
+        "r": {"type": "string"},                               # right hand
+        "emo": {"type": "string"},                             # emoji
+        "tv": {"type": "string"},                              # screen mood
+        "q": {"type": "string", "enum": ["keep", "add", "pause", "resume", "replace", "drop"]},
+        "g": {"type": "string"},                               # goal
+        "o": {"type": "boolean"},                              # override
+        "p": {"type": "number"},                               # pause seconds
+        "i": {"type": "integer"},                              # intensity
+        "m": {"type": "object"},                               # mood meter updates
+    },
+}
+
+# Priority-ordered keys for the reaction prompt. When the serialized context is over
+# budget we drop *whole* low-priority keys from the end, so the model never receives a
+# JSON object that was sliced mid-token (the previous behavior corrupted world state).
+_REACTION_CONTEXT_PRIORITY = [
+    "r", "goal", "act", "expr", "world", "activity", "pending_event",
+    "user_instruction", "screen", "scene", "media", "window",
+    "mood", "mood_top", "drive", "life_memory", "memory",
+    "inner_thought_feed", "speech_max_words", "tiny_agent_skills",
+]
+
+
+def build_reaction_prompt(context: Dict[str, object], char_budget: int = 2600) -> str:
+    """Serialize a compact, *always-valid* JSON view of the world for the reaction model.
+
+    Selects decision-relevant keys in priority order and drops whole keys until the
+    payload fits the budget, guaranteeing parseable JSON rather than a truncated blob.
+    """
+    payload: Dict[str, object] = {}
+    for key in _REACTION_CONTEXT_PRIORITY:
+        if key in context and context[key] not in (None, "", {}, []):
+            payload[key] = context[key]
+    # Include any remaining keys we did not explicitly prioritize, last.
+    for key, value in context.items():
+        if key not in payload and key not in {"compact_life_context_json"} and value not in (None, "", {}, []):
+            payload[key] = value
+
+    serialized = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+    while len(serialized) > char_budget and len(payload) > 4:
+        # Drop the lowest-priority key still present (iterate from the end).
+        for key in reversed(list(payload.keys())):
+            if key not in {"r", "goal", "world", "mood"}:
+                payload.pop(key, None)
+                break
+        else:
+            break
+        serialized = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+    return serialized
+
+
 def normalize_base_url(base_url: str) -> str:
     value = (base_url or "http://127.0.0.1:11434").strip().rstrip("/")
     if not value:
@@ -228,7 +308,7 @@ class OllamaClient:
         return compact_pet_line(raw, self.config.speech_max_words, 1)
 
     def react(self, context: Dict[str, object], image_b64: Optional[str] = None) -> Dict[str, object]:
-        prompt = "LIFE " + str(context.get("compact_life_context_json", "")) + " CTX " + json.dumps(context, ensure_ascii=False, separators=(",", ":"))[:1600]
+        prompt = build_reaction_prompt(context)
 
         def call(with_image: bool) -> str:
             user_message: Dict[str, object] = {"role": "user", "content": prompt}
@@ -242,6 +322,7 @@ class OllamaClient:
                 max_tokens=min(160, int(self.config.max_tokens)),
                 temperature=0.92,
                 json_mode=True,
+                schema=REACTION_SCHEMA,
             )
 
         try:
@@ -250,7 +331,7 @@ class OllamaClient:
             lower = str(exc).lower()
             if image_b64 and any(key in lower for key in ["image", "vision", "multimodal", "unsupported", "does not support"]):
                 context["img"] = "unsupported; use summary"
-                prompt = "LIFE " + str(context.get("compact_life_context_json", "")) + " CTX " + json.dumps(context, ensure_ascii=False, separators=(",", ":"))[:1600]
+                prompt = build_reaction_prompt(context)
                 raw = call(False)
             else:
                 raise
@@ -317,7 +398,14 @@ class OllamaClient:
             }
         return {"ok": False, "errors": errors}
 
-    def _complete(self, messages: Sequence[Dict[str, object]], max_tokens: int, temperature: float, json_mode: bool = False) -> str:
+    def _complete(
+        self,
+        messages: Sequence[Dict[str, object]],
+        max_tokens: int,
+        temperature: float,
+        json_mode: bool = False,
+        schema: Optional[Dict[str, object]] = None,
+    ) -> str:
         payload_base = {
             "model": self.config.model,
             "messages": list(messages),
@@ -332,17 +420,30 @@ class OllamaClient:
             },
         }
         if json_mode:
-            payload_base["format"] = "json"
+            # Prefer a strict schema (structured outputs); fall back to plain "json"
+            # mode and then no format at all if the runtime rejects either.
+            payload_base["format"] = schema if schema is not None else "json"
+
+        # Format fallback tiers: strict schema -> plain "json" -> no format.
+        if not json_mode:
+            format_tiers: List[object] = [None]
+        elif schema is not None:
+            format_tiers = [schema, "json", None]
+        else:
+            format_tiers = ["json", None]
 
         errors: List[str] = []
         tried_urls: List[str] = []
         for base in candidate_base_urls(self.config.base_url):
             url = base + "/api/chat"
             tried_urls.append(url)
-            for allow_json in ([True, False] if json_mode else [False]):
+            for fmt in format_tiers:
+                allow_json = fmt is not None
                 payload = dict(payload_base)
-                if not allow_json:
+                if fmt is None:
                     payload.pop("format", None)
+                else:
+                    payload["format"] = fmt
                 try:
                     response = requests.post(url, json=payload, timeout=self.config.timeout_seconds)
                 except requests.Timeout:
