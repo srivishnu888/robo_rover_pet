@@ -61,6 +61,65 @@ class PetMemoryStore:
         rel = self._data.get("relationship", {})
         return rel if isinstance(rel, dict) else {}
 
+    # ----------------------------------------------------- conversation memory
+    def remember_turn(self, user_text: str, pet_text: str, topic: str = "") -> None:
+        """Store a chat turn so Wally can recall and call back to past conversations.
+
+        A non-empty `topic` marks something worth proactively following up on later
+        (e.g. 'the auth bug') and is added to open threads."""
+        user_text = str(user_text or "").strip()[:160]
+        pet_text = str(pet_text or "").strip()[:160]
+        if not user_text:
+            return
+        convos = self._data.get("conversations")
+        if not isinstance(convos, list):
+            convos = []
+        convos.append({
+            "at": datetime.now().isoformat(timespec="minutes"),
+            "you": user_text,
+            "me": pet_text,
+        })
+        self._data["conversations"] = convos[-40:]
+
+        topic = str(topic or "").strip()[:80]
+        if topic:
+            threads = self._data.get("threads")
+            if not isinstance(threads, list):
+                threads = []
+            low = topic.lower()
+            if not any(str(t.get("topic", "")).lower() == low for t in threads if isinstance(t, dict)):
+                threads.append({"topic": topic, "at": time.time(), "followed_up": False})
+            self._data["threads"] = threads[-20:]
+
+    def conversation_highlights(self, limit: int = 6) -> List[Dict[str, str]]:
+        convos = self._data.get("conversations", [])
+        if not isinstance(convos, list):
+            return []
+        return [c for c in convos[-limit:] if isinstance(c, dict)]
+
+    def open_threads(self, min_age_seconds: float = 120.0, max_n: int = 3) -> List[Dict[str, object]]:
+        """Topics worth a proactive check-in: not yet followed up and aged a little."""
+        threads = self._data.get("threads", [])
+        if not isinstance(threads, list):
+            return []
+        now = time.time()
+        out = [
+            t for t in threads
+            if isinstance(t, dict) and not t.get("followed_up")
+            and (now - float(t.get("at", now))) >= min_age_seconds
+        ]
+        return out[:max_n]
+
+    def mark_thread_followed(self, topic: str) -> None:
+        threads = self._data.get("threads", [])
+        if not isinstance(threads, list):
+            return
+        low = str(topic or "").strip().lower()
+        for t in threads:
+            if isinstance(t, dict) and str(t.get("topic", "")).lower() == low:
+                t["followed_up"] = True
+        self._data["threads"] = threads
+
     def get_needs(self) -> Dict[str, float]:
         needs = self._data.get("needs", {})
         out: Dict[str, float] = {}
@@ -233,6 +292,8 @@ class PetMemoryStore:
             "gags": self.get_gags(),
             "user_patterns": self._data.get("user_patterns", {}),
             "needs": {k: round(float(v), 1) for k, v in (needs or self.get_needs()).items()},
+            "conversations": self._data.get("conversations", []),
+            "threads": self._data.get("threads", []),
         }
         try:
             tmp = self.path.with_suffix(".json.tmp")

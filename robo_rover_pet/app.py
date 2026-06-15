@@ -3412,6 +3412,7 @@ class PetWindow(QWidget):
 
     def submit_user_message(self, text: str) -> None:
         self.cfg = self.store.config()
+        self._last_chat_user_text = text
         # Talking to him is affection too.
         self._satisfy_need("affection", 8, react=False)
         if self.chat_dialog:
@@ -3462,6 +3463,8 @@ class PetWindow(QWidget):
             f"USER_TO_PET: {text}\n"
             f"WORLD: {json.dumps(context_hint, ensure_ascii=False, separators=(',', ':'))[:4200]}\n"
             f"Reply as Wally in under {self.cfg.speech_max_words} words. "
+            f"Right now your vibe is: {self._current_tone_hint()} — let it color your reply. "
+            "Use life_memory.conversation_highlights to stay consistent and call back to past chats when natural. "
             "If this is an action command, acknowledge and stay in character. "
             "If asked about the screen, answer from the attached local screenshot."
         )
@@ -3495,6 +3498,11 @@ class PetWindow(QWidget):
         self.last_response_text = answer
         self.chat_history.append({"role": "assistant", "content": answer})
         self.chat_history = self.chat_history[-18:]
+        # Remember the conversation (and flag anything worth a proactive follow-up).
+        store = getattr(self, "memory_store", None)
+        if store is not None:
+            user_said = str(getattr(self, "_last_chat_user_text", "") or "")
+            store.remember_turn(user_said, answer, topic=self._extract_thread(user_said))
         if self.chat_dialog:
             self.chat_dialog.append_pet(answer)
         self.set_expression(self._reaction_for_answer(answer))
@@ -4514,6 +4522,46 @@ class PetWindow(QWidget):
             self._remember_pet_line(line)
             self._last_need_request_at = now
 
+    def _proactive_followup_tick(self) -> None:
+        """Occasionally circle back to something the user mentioned earlier — a real
+        check-in like a friend ('how'd that auth bug go?'). The LLM phrases it from the
+        stored topic; a gentle template covers the offline case."""
+        store = getattr(self, "memory_store", None)
+        if store is None:
+            return
+        now = time.time()
+        if now - float(getattr(self, "_last_followup_at", 0.0)) < 480.0:
+            return
+        if self.is_dragging or self.current_action in {"clean", "go_bin", "chase_eva", "chase_butterfly", "kick_ball", "move_to"}:
+            return
+        if self.bubble_text and now < float(getattr(self, "_bubble_protected_until", 0.0)):
+            return
+        threads = store.open_threads(min_age_seconds=150.0, max_n=3)
+        if not threads or random.random() < 0.4:
+            return
+        thread = random.choice(threads)
+        topic = str(thread.get("topic", "")).strip()
+        if not topic:
+            return
+        store.mark_thread_followed(topic)
+        self._last_followup_at = now
+        if self.cfg.ai_reactions_enabled and not self._thread_running(self.reaction_worker):
+            self._pending_activity_note = {
+                "kind": "proactive_followup",
+                "topic": topic,
+                "hint": "Earlier the user mentioned this. Ask a warm, natural, specific check-in about how it went. Keep it short and caring, like a friend remembering.",
+            }
+            self.request_ai_reaction("proactive_followup", use_vision=False)
+        else:
+            short_topic = " ".join(topic.split()[:6])
+            line = f"How's that going — {short_topic}?"
+            self.show_bubble(line, 7600, source="static")
+            self.emoji_effect = "🤔"
+            self.emoji_until = now + 6.0
+            self.set_expression("curious")
+            self._remember_pet_line(line)
+            self._last_spoken_bubble_at = now
+
     def _satisfy_need(self, name: str, amount: float, react: bool = True) -> None:
         """The user did something caring; refill a need and show gratitude."""
         if name not in self.needs:
@@ -4539,6 +4587,40 @@ class PetWindow(QWidget):
                     self.set_expression("love" if name == "affection" else "happy")
                     self._remember_pet_line(line)
                     self._last_event_quip_at = now
+
+    _TONE_BY_MOOD = {
+        "playful": "playful and witty", "naughty": "mischievous and teasing",
+        "excited": "hyper and enthusiastic", "proud": "smug and proud",
+        "bored": "bored and dryly sarcastic", "irritated": "grumpy and sarcastic",
+        "frustrated": "frazzled but still trying", "cozy": "warm and soft",
+        "curious": "curious and chatty", "anxious": "a little anxious but caring",
+    }
+
+    def _current_tone_hint(self) -> str:
+        """A short directive describing Wally's CURRENT vibe, so chat replies match
+        his mood engine (witty when playful, terse when tired, sarcastic when grumpy)."""
+        if self.needs.get("energy", 100) < 28:
+            return "low-energy: tired, sleepy, a little terse"
+        mood = self._dominant_mood(min_spike=6.0)
+        return self._TONE_BY_MOOD.get(mood or "", "warm and witty")
+
+    _THREAD_TRIGGERS = (
+        "deadline", "due ", "tomorrow", "bug", "fix", "error", "crash", "meeting", "interview",
+        "exam", "test", "presentation", "demo", "launch", "ship", "release", "deploy", "sick",
+        "tired", "stressed", "worried", "nervous", "excited", "trying to", "working on", "project",
+        "assignment", "homework", "doctor", "appointment", "hoping", "scared", "anxious",
+    )
+
+    def _extract_thread(self, user_text: str) -> str:
+        """If the user mentioned something worth following up on, return a short gist
+        of it (Wally will rephrase a natural check-in later); else empty string."""
+        t = str(user_text or "").strip()
+        if len(t) < 6 or t.endswith("?"):
+            return ""
+        low = t.lower()
+        if not any(trig in low for trig in self._THREAD_TRIGGERS):
+            return ""
+        return " ".join(t.split()[:12])[:80]
 
     def _banter_context(self) -> Dict[str, object]:
         """Live state for the wit engine so instant lines match the real moment."""
@@ -5400,6 +5482,7 @@ class PetWindow(QWidget):
         self._update_mood_model()
         self._wellbeing_tick()
         self._needs_tick()
+        self._proactive_followup_tick()
         debris_count = self.debris_overlay.item_count() if self.cfg.debris_enabled else 0
         active_moving = self.current_action in {"clean", "go_bin", "chase_butterfly", "chase_eva", "watch_tv", "move_to", "kick_ball", "inspect_mouse", "kick_ball"} and self.target_point is not None
 
@@ -6105,10 +6188,13 @@ class PetWindow(QWidget):
         store = getattr(self, "memory_store", None)
         relationship = store.relationship_context() if store is not None else {}
         running_gags = store.get_gags()[-6:] if store is not None else []
+        conversation_highlights = store.conversation_highlights() if store is not None else []
         return {
             "timeline": recent_events[-10:],
             "recent_rivet_said": recent_lines,
             "recent_chat": recent_chat,
+            "conversation_highlights": conversation_highlights,
+            "conversation_note": "Past chats with this user. Reference them naturally to build rapport and call back to earlier topics.",
             "relationship": relationship,
             "relationship_note": "Long-term bond with this user; reference it naturally when it fits, never robotically.",
             "running_gags": running_gags,
