@@ -191,6 +191,7 @@ class RuntimeConfig:
     roam_enabled: bool
     taskbar_only: bool
     debris_enabled: bool
+    weather_enabled: bool
     screen_awareness_enabled: bool
     screenshot_reactions_enabled: bool
     ai_reactions_enabled: bool
@@ -225,6 +226,7 @@ class Puff:
     y: float
     life: float
     size: float
+    kind: str = "dust"
 
 
 @dataclass
@@ -252,6 +254,41 @@ class Basketball:
     last_super_kick_at: float = 0.0
     last_kick_style: str = "none"
     wall_hits: int = 0
+
+
+@dataclass
+class WeatherCloud:
+    x: float
+    y: float
+    scale: float
+    vx: float
+    alpha: int
+
+
+@dataclass
+class RainDrop:
+    x: float
+    y: float
+    length: float
+    speed: float
+
+
+@dataclass
+class Puddle:
+    x: float
+    y: float
+    width: float
+    depth: float
+    alpha: float
+
+
+@dataclass
+class MudTrail:
+    x: float
+    y: float
+    width: float
+    alpha: float
+    age: float = 0.0
 
 
 
@@ -344,6 +381,7 @@ class SettingsStore:
             roam_enabled=self.boolean("pet/roam_enabled", True),
             taskbar_only=self.boolean("pet/taskbar_only", True),
             debris_enabled=self.boolean("pet/debris_enabled", True),
+            weather_enabled=self.boolean("pet/weather_enabled", True),
             screen_awareness_enabled=self.boolean("awareness/screen_awareness_enabled", True),
             screenshot_reactions_enabled=self.boolean("awareness/screenshot_reactions_enabled", True),
             ai_reactions_enabled=self.boolean("awareness/ai_reactions_enabled", True),
@@ -409,6 +447,9 @@ class SettingsDialog(QDialog):
 
         self.debris_checkbox = QCheckBox("Spawn leaves, paper, and dust for the pet to clean")
         self.debris_checkbox.setChecked(cfg.debris_enabled)
+
+        self.weather_checkbox = QCheckBox("Enable tiny weather ambience like clouds, sun, rain, and puddles")
+        self.weather_checkbox.setChecked(cfg.weather_enabled)
 
         self.ai_reactions_checkbox = QCheckBox("Let Ollama control goals, movement, body language, and emotions")
         self.ai_reactions_checkbox.setChecked(cfg.ai_reactions_enabled)
@@ -492,6 +533,7 @@ class SettingsDialog(QDialog):
         form.addRow("", self.roam_checkbox)
         form.addRow("", self.taskbar_checkbox)
         form.addRow("", self.debris_checkbox)
+        form.addRow("", self.weather_checkbox)
         form.addRow("", self.ai_reactions_checkbox)
         form.addRow("", self.awareness_checkbox)
         form.addRow("", self.screenshot_checkbox)
@@ -519,6 +561,7 @@ class SettingsDialog(QDialog):
         self.store.set_value("pet/roam_enabled", self.roam_checkbox.isChecked())
         self.store.set_value("pet/taskbar_only", self.taskbar_checkbox.isChecked())
         self.store.set_value("pet/debris_enabled", self.debris_checkbox.isChecked())
+        self.store.set_value("pet/weather_enabled", self.weather_checkbox.isChecked())
         self.store.set_value("pet/scale_percent", self.scale_spin.value())
         self.store.set_value("pet/speech_max_words", self.speech_words_spin.value())
         self.store.set_value("pet/work_trash_enabled", self.work_trash_checkbox.isChecked())
@@ -1283,6 +1326,23 @@ class DebrisOverlay(QWidget):
         self.next_wind_window_at = time.time() + random.uniform(18, 35)
         self.wind_piles_remaining = 0
         self.next_wind_pile_at = 0.0
+        self.weather_enabled = bool(self.store.config().weather_enabled)
+        self.weather_mode = random.choice(["sunny", "cloudy", "windy"])
+        self.weather_mode_until = time.time() + random.uniform(45, 90)
+        self.daylight_override = ""
+        self.sun_phase = random.uniform(0, math.tau)
+        self.cloud_flow_dir = 1 if random.random() < 0.5 else -1
+        self.clouds: List[WeatherCloud] = []
+        self.rain_drops: List[RainDrop] = []
+        self.puddles: List[Puddle] = []
+        self.mud_trails: List[MudTrail] = []
+        self.mud_cleaner_visible = False
+        self.mud_cleaner_x = 0.0
+        self.mud_cleaner_y = 0.0
+        self.mud_cleaner_phase = random.uniform(0, math.tau)
+        self.mud_cleaner_state = "hidden"
+        self.mud_cleaner_exit_dir = 1
+        self._last_mud_trail_at = 0.0
         self.enabled = False
         self.setAttribute(Qt.WA_TranslucentBackground, True)
         self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
@@ -1306,6 +1366,67 @@ class DebrisOverlay(QWidget):
         else:
             self.hide()
 
+    def set_weather_enabled(self, enabled: bool) -> None:
+        self.weather_enabled = bool(enabled)
+        if not self.weather_enabled:
+            self.rain_drops = []
+            self.puddles = []
+        else:
+            self.weather_mode_until = min(self.weather_mode_until, time.time() + 2.0)
+        self.update()
+
+    def set_weather_mode(self, mode: str, duration_seconds: float = 90.0) -> None:
+        mode = (mode or "").strip().lower()
+        if mode not in {"sunny", "cloudy", "windy", "rainy"}:
+            return
+        self.weather_enabled = True
+        self.weather_mode = mode
+        self.weather_mode_until = time.time() + max(20.0, float(duration_seconds))
+        self.cloud_flow_dir = 1 if random.random() < 0.5 else -1
+        w = max(1, self.width())
+        h = max(1, self.height())
+        if mode == "cloudy":
+            self.clouds = []
+            for idx in range(7):
+                direction = self.cloud_flow_dir
+                self.clouds.append(WeatherCloud(
+                    x=random.uniform(36.0, max(40.0, w - 36.0)),
+                    y=random.uniform(42, max(44, min(h * 0.30, 98))),
+                    scale=random.uniform(0.78, 1.18),
+                    vx=random.uniform(0.24, 0.50) * direction,
+                    alpha=random.randint(126, 166),
+                ))
+        if mode in {"cloudy", "rainy"}:
+            target = 7 if mode == "cloudy" else 5
+            while len(self.clouds) < target:
+                direction = self.cloud_flow_dir
+                start_x = random.uniform(-110, -28) if direction > 0 else random.uniform(w + 28, w + 110)
+                self.clouds.append(WeatherCloud(
+                    x=start_x,
+                    y=random.uniform(42, max(44, min(h * 0.30, 98))),
+                    scale=random.uniform(0.78, 1.18 if mode == "cloudy" else 1.20),
+                    vx=random.uniform(0.22, 0.48) * direction,
+                    alpha=random.randint(128, 176 if mode == "cloudy" else 156),
+                ))
+        if mode == "windy":
+            self.wind_gust_until = max(self.wind_gust_until, time.time() + random.uniform(3.0, 5.5))
+        if mode == "rainy" and len(self.puddles) < 2:
+            for _ in range(2 - len(self.puddles)):
+                self.puddles.append(Puddle(
+                    x=random.uniform(54.0, max(55.0, w - 54.0)),
+                    y=h - 14.0,
+                    width=random.uniform(26.0, 44.0),
+                    depth=random.uniform(6.0, 10.0),
+                    alpha=random.uniform(0.26, 0.38),
+                ))
+        self.update()
+
+    def set_daylight_override(self, phase: str) -> None:
+        phase = (phase or "").strip().lower()
+        self.daylight_override = phase if phase in {"dawn", "day", "dusk", "night"} else ""
+        self.weather_enabled = True
+        self.update()
+
     def set_lane(self, lane: QRect) -> None:
         if lane.isNull() or not lane.isValid():
             return
@@ -1322,6 +1443,294 @@ class DebrisOverlay(QWidget):
                 self.ball.y = max(20, self.height() - 17)
                 self._ball_centered_once = True
             self.update()
+
+    def _seed_weather_scene(self, w: int, h: int) -> None:
+        if self.clouds:
+            return
+        for idx in range(random.randint(4, 6)):
+            direction = self.cloud_flow_dir
+            start_x = random.uniform(-90, -22) if direction > 0 else random.uniform(w + 22, w + 90)
+            self.clouds.append(WeatherCloud(
+                x=start_x,
+                y=random.uniform(42, max(44, min(h * 0.30, 96))),
+                scale=random.uniform(0.74, 1.18),
+                vx=random.uniform(0.18, 0.42) * direction,
+                alpha=random.randint(102, 148),
+            ))
+
+    def _choose_next_weather_mode(self) -> str:
+        current = str(getattr(self, "weather_mode", "sunny"))
+        weights = {
+            "sunny": (["sunny", "cloudy", "windy", "rainy"], [4, 4, 2, 1]),
+            "cloudy": (["sunny", "cloudy", "windy", "rainy"], [3, 4, 2, 2]),
+            "windy": (["sunny", "cloudy", "windy", "rainy"], [2, 3, 4, 1]),
+            "rainy": (["sunny", "cloudy", "windy", "rainy"], [2, 4, 2, 2]),
+        }
+        modes, probs = weights.get(current, (["sunny", "cloudy", "windy", "rainy"], [3, 4, 2, 1]))
+        return random.choices(modes, weights=probs, k=1)[0]
+
+    def _daylight_phase(self) -> str:
+        override = str(getattr(self, "daylight_override", "") or "")
+        if override:
+            return override
+        now_dt = datetime.now()
+        minute_of_day = now_dt.hour * 60 + now_dt.minute
+        if 5 * 60 <= minute_of_day < 7 * 60:
+            return "dawn"
+        if 7 * 60 <= minute_of_day < 18 * 60:
+            return "day"
+        if 18 * 60 <= minute_of_day < 20 * 60:
+            return "dusk"
+        return "night"
+
+    def _celestial_progress(self) -> Tuple[str, float]:
+        override = str(getattr(self, "daylight_override", "") or "")
+        if override == "dawn":
+            return "sun", 0.10
+        if override == "day":
+            return "sun", 0.50
+        if override == "dusk":
+            return "sun", 0.90
+        if override == "night":
+            return "moon", 0.50
+        now_dt = datetime.now()
+        minute_of_day = now_dt.hour * 60 + now_dt.minute + now_dt.second / 60.0
+        if 5 * 60 <= minute_of_day < 20 * 60:
+            span = (20 - 5) * 60
+            progress = (minute_of_day - 5 * 60) / float(span)
+            return "sun", max(0.0, min(1.0, progress))
+        if minute_of_day < 5 * 60:
+            minute_of_day += 24 * 60
+        span = (29 - 20) * 60
+        progress = (minute_of_day - 20 * 60) / float(span)
+        return "moon", max(0.0, min(1.0, progress))
+
+    def weather_status(self) -> Dict[str, object]:
+        geo = self.geometry()
+        body_kind, body_progress = self._celestial_progress()
+        w = max(1, self.width())
+        body_x = geo.left() + 36 + (w - 72) * body_progress
+        arch = math.sin(max(0.0, min(1.0, body_progress)) * math.pi)
+        body_y = geo.top() + 26 + (1.0 - arch) * 28
+        cloud_positions = [
+            [round(geo.left() + cloud.x, 1), round(geo.top() + cloud.y, 1), round(cloud.scale, 2)]
+            for cloud in self.clouds[:5]
+        ]
+        puddle_positions = [
+            [round(geo.left() + puddle.x, 1), round(geo.top() + puddle.y, 1), round(puddle.width, 1)]
+            for puddle in self.puddles[:4]
+        ]
+        cleaner_xy = None
+        if self.mud_cleaner_visible:
+            cleaner_xy = [round(geo.left() + self.mud_cleaner_x, 1), round(geo.top() + self.mud_cleaner_y, 1)]
+        return {
+            "enabled": bool(self.weather_enabled),
+            "mode": self.weather_mode,
+            "daylight": self._daylight_phase(),
+            "celestial": {
+                "kind": body_kind,
+                "progress": round(body_progress, 3),
+                "global_xy": [round(body_x, 1), round(body_y, 1)],
+            },
+            "cloud_count": len(self.clouds),
+            "clouds": cloud_positions,
+            "puddle_count": len(self.puddles),
+            "puddles": puddle_positions,
+            "mud_trail_count": len(self.mud_trails),
+            "mud_cleaner": {
+                "visible": bool(self.mud_cleaner_visible),
+                "global_xy": cleaner_xy,
+                "state": str(getattr(self, "mud_cleaner_state", "hidden")),
+                "mood_hint": "tiny fussy rain cleaner scrubbing Wally's mud trails" if self.mud_cleaner_visible else "gone",
+            },
+            "rain_active": self.weather_mode == "rainy",
+            "wind_strength": round(float(self.wind), 2),
+        }
+
+    def nearest_puddle_global_to(self, global_x: int, global_y: int) -> Optional[QPoint]:
+        if not self.puddles:
+            return None
+        geo = self.geometry()
+        best = min(
+            self.puddles,
+            key=lambda puddle: abs((geo.left() + puddle.x) - global_x) + 0.35 * abs((geo.top() + puddle.y) - global_y),
+        )
+        return QPoint(int(geo.left() + best.x), int(geo.top() + best.y))
+
+    def _puddle_contains_local(self, local_x: float, local_y: float, x_pad: float = 0.0, y_pad: float = 0.0) -> bool:
+        for puddle in self.puddles:
+            if abs(local_x - puddle.x) <= (puddle.width * 0.88 + x_pad) and abs(local_y - puddle.y) <= (puddle.depth + y_pad):
+                return True
+        return False
+
+    def add_mud_trail_global(self, global_x: int, global_y: int) -> bool:
+        if not self.weather_enabled or self.weather_mode != "rainy":
+            return False
+        now = time.time()
+        if now - self._last_mud_trail_at < 0.34:
+            return False
+        geo = self.geometry()
+        x = max(22.0, min(max(24.0, self.width() - 22.0), global_x - geo.left()))
+        y = max(16.0, min(max(18.0, self.height() - 10.0), global_y - geo.top() - 5.0))
+        if self.mud_trails and abs(self.mud_trails[-1].x - x) < 13:
+            return False
+        self._last_mud_trail_at = now
+        self.mud_trails.append(MudTrail(
+            x=x + random.uniform(-6.0, 6.0),
+            y=y + random.uniform(-2.5, 2.5),
+            width=random.uniform(10.0, 20.0),
+            alpha=random.uniform(0.34, 0.52),
+        ))
+        self.mud_trails = self.mud_trails[-26:]
+        self.update()
+        return True
+
+    def mud_cleaner_point_global(self) -> Optional[QPoint]:
+        if not self.mud_cleaner_visible:
+            return None
+        geo = self.geometry()
+        return QPoint(int(geo.left() + self.mud_cleaner_x), int(geo.top() + self.mud_cleaner_y))
+
+    def _reset_rain_drop(self, drop: RainDrop, w: int, h: int) -> None:
+        drop.x = random.uniform(20, max(22, w - 20))
+        drop.y = random.uniform(-max(24.0, h * 0.30), -8.0)
+        drop.length = random.uniform(7.0, 14.0)
+        drop.speed = random.uniform(7.0, 11.8)
+
+    def _update_weather(self, w: int, h: int, now: float, base_flow: float) -> None:
+        if not self.weather_enabled:
+            return
+        self._seed_weather_scene(w, h)
+        self.sun_phase += 0.018
+        target_clouds = 7 if self.weather_mode == "cloudy" else (5 if self.weather_mode == "rainy" else (4 if self.weather_mode == "windy" else 3))
+        while len(self.clouds) < target_clouds:
+            direction = self.cloud_flow_dir
+            start_x = random.uniform(-110, -28) if direction > 0 else random.uniform(w + 28, w + 110)
+            self.clouds.append(WeatherCloud(
+                x=start_x,
+                y=random.uniform(42, max(44, min(h * 0.30, 98))),
+                scale=random.uniform(0.78, 1.24),
+                vx=random.uniform(0.20, 0.46) * direction,
+                alpha=random.randint(112, 168 if self.weather_mode == "cloudy" else 148),
+            ))
+        if now >= self.weather_mode_until:
+            self.weather_mode = self._choose_next_weather_mode()
+            self.weather_mode_until = now + random.uniform(50, 95)
+            if self.weather_mode == "windy":
+                self.wind_gust_until = max(self.wind_gust_until, now + random.uniform(2.8, 5.2))
+        for cloud in self.clouds:
+            drift = cloud.vx + base_flow * (0.40 if self.weather_mode != "rainy" else 0.24)
+            if self.weather_mode == "windy":
+                drift += self.wind * 0.70
+            elif self.weather_mode == "cloudy":
+                drift += self.wind * 0.22
+            cloud.x += drift
+            cloud.y += 0.16 * math.sin(self.sun_phase + cloud.scale + cloud.x * 0.01)
+            limit = cloud.scale * 42
+            if cloud.x > w + limit:
+                cloud.x = random.uniform(-limit - 64, -limit - 12)
+                cloud.y = random.uniform(42, max(44, min(h * 0.30, 96)))
+                cloud.vx = abs(cloud.vx) * self.cloud_flow_dir
+            elif cloud.x < -limit:
+                cloud.x = random.uniform(w + limit + 12, w + limit + 64)
+                cloud.y = random.uniform(42, max(44, min(h * 0.30, 96)))
+                cloud.vx = abs(cloud.vx) * self.cloud_flow_dir
+        if self.weather_mode == "rainy":
+            target_drops = 14
+            while len(self.rain_drops) < target_drops:
+                drop = RainDrop(0.0, 0.0, 9.0, 8.5)
+                self._reset_rain_drop(drop, w, h)
+                self.rain_drops.append(drop)
+            for drop in self.rain_drops:
+                drop.y += drop.speed
+                drop.x += self.wind * 0.9 + base_flow * 0.35
+                if drop.y >= h - 18:
+                    if random.random() < 0.16 and len(self.puddles) < 4:
+                        self.puddles.append(Puddle(
+                            x=max(36.0, min(w - 36.0, drop.x + random.uniform(-16.0, 16.0))),
+                            y=h - 14.0,
+                            width=random.uniform(22.0, 42.0),
+                            depth=random.uniform(5.0, 10.0),
+                            alpha=random.uniform(0.26, 0.42),
+                        ))
+                    self._reset_rain_drop(drop, w, h)
+        else:
+            self.rain_drops = []
+        kept_puddles: List[Puddle] = []
+        for puddle in self.puddles:
+            if self.weather_mode == "rainy":
+                puddle.alpha = min(0.56, puddle.alpha + 0.012)
+                puddle.width = min(54.0, puddle.width + 0.06)
+            else:
+                puddle.alpha -= 0.0028
+                puddle.width *= 0.9993
+            puddle.x = max(28.0, min(w - 28.0, puddle.x + self.wind * 0.08))
+            if puddle.alpha > 0.05:
+                kept_puddles.append(puddle)
+        self.puddles = kept_puddles
+        self._update_mud_cleaner(w, h, now)
+
+    def _update_mud_cleaner(self, w: int, h: int, now: float) -> None:
+        floor_y = max(22.0, h - 17.0)
+        rainy = self.weather_mode == "rainy"
+        for trail in self.mud_trails:
+            trail.age += 1
+            if rainy:
+                trail.alpha = min(0.56, trail.alpha)
+            else:
+                trail.alpha = min(0.56, trail.alpha)
+        if not rainy and not self.mud_trails:
+            if self.mud_cleaner_visible and self.mud_cleaner_state != "exit":
+                self.mud_cleaner_state = "exit"
+                self.mud_cleaner_exit_dir = -1 if self.mud_cleaner_x < w * 0.5 else 1
+            elif not self.mud_cleaner_visible:
+                return
+        if self.mud_trails and not self.mud_cleaner_visible:
+            self.mud_cleaner_visible = True
+            self.mud_cleaner_state = "enter"
+            from_left = random.random() < 0.5
+            self.mud_cleaner_exit_dir = 1 if from_left else -1
+            self.mud_cleaner_x = -52.0 if from_left else w + 52.0
+            self.mud_cleaner_y = floor_y - 18.0
+        if not self.mud_cleaner_visible:
+            return
+        self.mud_cleaner_phase += 0.12
+        self.mud_cleaner_y = floor_y - 18.0 + 1.6 * math.sin(self.mud_cleaner_phase)
+        if self.mud_cleaner_state == "exit":
+            self.mud_cleaner_x += max(4.2, min(6.4, 5.0 + len(self.mud_trails) * 0.05)) * self.mud_cleaner_exit_dir
+            if self.mud_cleaner_x < -58.0 or self.mud_cleaner_x > w + 58.0:
+                self.mud_cleaner_visible = False
+                self.mud_cleaner_state = "hidden"
+            return
+        target = max(self.mud_trails, key=lambda trail: trail.age + trail.alpha * 80.0) if self.mud_trails else None
+        if target is None:
+            self.mud_cleaner_state = "exit"
+            return
+        dx = target.x - self.mud_cleaner_x
+        if self.mud_cleaner_state == "enter" and -2.0 <= self.mud_cleaner_x <= w + 2.0:
+            self.mud_cleaner_state = "clean"
+        speed_cap = 5.2 if self.mud_cleaner_state == "enter" else 4.4
+        step = max(-speed_cap, min(speed_cap, dx * 0.16))
+        self.mud_cleaner_x += step
+        if self.mud_cleaner_state == "enter":
+            return
+        cleaned_any = False
+        for trail in list(self.mud_trails):
+            brush_dx = abs(trail.x - self.mud_cleaner_x)
+            brush_dy = abs(trail.y - (floor_y - 8.0))
+            if brush_dx < max(16.0, trail.width + 8.0) and brush_dy < 18.0:
+                cleaned_any = True
+                trail.alpha -= 0.16
+                trail.width *= 0.86
+                if trail.alpha <= 0.10 or trail.width < 4.0:
+                    try:
+                        self.mud_trails.remove(trail)
+                    except ValueError:
+                        pass
+        if cleaned_any:
+            if now - float(getattr(self, "_last_mud_clean_splash_at", 0.0)) > 0.35:
+                self._last_mud_clean_splash_at = now
+                self._add_puddle_splash(self.mud_cleaner_x, floor_y - 9.0, count=3)
 
     def item_count(self) -> int:
         return len(self.items)
@@ -1394,6 +1803,17 @@ class DebrisOverlay(QWidget):
                 y + random.uniform(-10, 8),
                 random.uniform(0.75, 1.15),
                 random.uniform(7, 17),
+                "dust",
+            ))
+
+    def _add_puddle_splash(self, x: float, y: float, count: int = 6) -> None:
+        for _ in range(count):
+            self.puffs.append(Puff(
+                x + random.uniform(-16, 16),
+                y + random.uniform(-6, 4),
+                random.uniform(0.62, 0.95),
+                random.uniform(5.5, 12.5),
+                "splash",
             ))
 
     def clear_near_global(self, global_x: int, global_y: int, radius: int = 42) -> int:
@@ -1624,6 +2044,7 @@ class DebrisOverlay(QWidget):
     def ball_status(self) -> Dict[str, object]:
         point = self.ball_point_global()
         speed = abs(getattr(self.ball, "vx", 0.0)) + abs(getattr(self.ball, "vy", 0.0))
+        floor_y = max(20, self.height() - 17)
         return {
             "visible": bool(getattr(self.ball, "visible", False)),
             "global_xy": [point.x(), point.y()] if point else None,
@@ -1633,6 +2054,7 @@ class DebrisOverlay(QWidget):
             "last_super_kick_seconds": round(max(0.0, time.time() - getattr(self.ball, "last_super_kick_at", 0.0)), 1) if getattr(self.ball, "last_super_kick_at", 0.0) else None,
             "last_style": getattr(self.ball, "last_kick_style", "none"),
             "wall_hits": int(getattr(self.ball, "wall_hits", 0)),
+            "over_puddle": bool(self._puddle_contains_local(self.ball.x, floor_y, x_pad=8, y_pad=9)),
         }
 
     def kick_ball_global(self, kicker_x: int, power: float = 1.0, style: str = "random", super_kick: bool = False) -> Dict[str, object]:
@@ -1682,6 +2104,7 @@ class DebrisOverlay(QWidget):
     def _update_ball(self, w: int, h: int) -> None:
         if not getattr(self.ball, "visible", False):
             return
+        now = time.time()
         floor_y = max(20, h - 17)
         ceiling_y = 14
         self.ball_phase += 0.12
@@ -1691,6 +2114,12 @@ class DebrisOverlay(QWidget):
         self.ball.spin += self.ball.vx * 2.9
         speed = abs(self.ball.vx) + abs(self.ball.vy)
         self.ball.vx *= 0.994 if speed > 12 else 0.986
+        puddle_hit = self._puddle_contains_local(self.ball.x, floor_y, x_pad=8, y_pad=9)
+        if puddle_hit:
+            self.ball.vx *= 0.978
+            if now - float(getattr(self.ball, "_last_puddle_splash_at", 0.0)) > 0.8 and speed > 0.35:
+                setattr(self.ball, "_last_puddle_splash_at", now)
+                self._add_puddle_splash(self.ball.x, floor_y - 3, count=5)
         if self.ball.y < ceiling_y:
             self.ball.y = ceiling_y
             self.ball.vy = abs(self.ball.vy) * (0.82 if speed > 9 else 0.62)
@@ -1698,7 +2127,8 @@ class DebrisOverlay(QWidget):
         if self.ball.y >= floor_y:
             self.ball.y = floor_y
             if abs(self.ball.vy) > 1.2:
-                self.ball.vy = -abs(self.ball.vy) * (0.66 if speed > 10 else 0.48)
+                bounce_scale = 0.42 if puddle_hit else (0.66 if speed > 10 else 0.48)
+                self.ball.vy = -abs(self.ball.vy) * bounce_scale
                 self.ball.wall_hits += 1
             else:
                 self.ball.vy = 0.0
@@ -1736,6 +2166,7 @@ class DebrisOverlay(QWidget):
 
         w = max(1, self.width())
         h = max(1, self.height())
+        self._update_weather(w, h, now, base_flow)
         self.tv_phase += 0.08
         self.tree_phase += 0.05 + min(0.055, abs(self.wind) * 0.052)
         self._update_butterfly(w, h)
@@ -2007,9 +2438,14 @@ class DebrisOverlay(QWidget):
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing)
         p.setPen(Qt.NoPen)
+        self._draw_weather_backdrop(p)
         self._draw_props(p)
+        self._draw_ground_weather(p)
+        self._draw_mud_trails(p)
         if getattr(self.ball, "visible", False):
             self._draw_basketball(p)
+        if self.mud_cleaner_visible:
+            self._draw_mud_cleaner(p)
         if self.butterfly_visible:
             self._draw_butterfly(p)
         if self.eva_visible:
@@ -2028,13 +2464,21 @@ class DebrisOverlay(QWidget):
 
         for puff in self.puffs:
             alpha = int(max(0, min(1, puff.life)) * 155)
-            p.setBrush(QColor(224, 214, 188, alpha))
-            p.setPen(Qt.NoPen)
-            p.drawEllipse(QPointF(puff.x, puff.y), puff.size, puff.size * 0.65)
-            if puff.size > 10:
-                p.setPen(QPen(QColor(255, 246, 185, min(230, alpha + 35)), 1.4, Qt.SolidLine, Qt.RoundCap))
-                p.drawLine(QPointF(puff.x - puff.size * 0.55, puff.y), QPointF(puff.x + puff.size * 0.55, puff.y))
-                p.drawLine(QPointF(puff.x, puff.y - puff.size * 0.45), QPointF(puff.x, puff.y + puff.size * 0.45))
+            if getattr(puff, "kind", "dust") == "splash":
+                p.setBrush(QColor(138, 190, 238, min(210, alpha + 28)))
+                p.setPen(Qt.NoPen)
+                p.drawEllipse(QPointF(puff.x, puff.y), puff.size * 0.75, puff.size * 0.42)
+                p.setPen(QPen(QColor(230, 245, 255, min(235, alpha + 58)), 1.2, Qt.SolidLine, Qt.RoundCap))
+                p.drawLine(QPointF(puff.x - puff.size * 0.32, puff.y - puff.size * 0.10), QPointF(puff.x, puff.y - puff.size * 0.55))
+                p.drawLine(QPointF(puff.x + puff.size * 0.28, puff.y - puff.size * 0.04), QPointF(puff.x + puff.size * 0.08, puff.y - puff.size * 0.50))
+            else:
+                p.setBrush(QColor(224, 214, 188, alpha))
+                p.setPen(Qt.NoPen)
+                p.drawEllipse(QPointF(puff.x, puff.y), puff.size, puff.size * 0.65)
+                if puff.size > 10:
+                    p.setPen(QPen(QColor(255, 246, 185, min(230, alpha + 35)), 1.4, Qt.SolidLine, Qt.RoundCap))
+                    p.drawLine(QPointF(puff.x - puff.size * 0.55, puff.y), QPointF(puff.x + puff.size * 0.55, puff.y))
+                    p.drawLine(QPointF(puff.x, puff.y - puff.size * 0.45), QPointF(puff.x, puff.y + puff.size * 0.45))
 
     def _draw_basketball(self, p: QPainter) -> None:
         p.save()
@@ -2150,6 +2594,164 @@ class DebrisOverlay(QWidget):
         p.setBrush(QColor(146, 132, 106, 145))
         p.setPen(Qt.NoPen)
         p.drawEllipse(QPointF(0, 0), size, size * 0.7)
+
+    def _draw_weather_backdrop(self, p: QPainter) -> None:
+        if not self.weather_enabled:
+            return
+        w = self.width()
+        phase = self._daylight_phase()
+        body_kind, body_progress = self._celestial_progress()
+        body_x = 36 + (w - 72) * body_progress
+        arch = math.sin(max(0.0, min(1.0, body_progress)) * math.pi)
+        body_y = 54 + (1.0 - arch) * 18
+        if body_kind == "sun":
+            glow = QRadialGradient(QPointF(body_x, body_y), 44)
+            if phase == "dawn":
+                glow.setColorAt(0, QColor(255, 206, 150, 108))
+                glow.setColorAt(1, QColor(255, 206, 150, 0))
+                sun_color = QColor(255, 190, 122, 225)
+            elif phase == "dusk":
+                glow.setColorAt(0, QColor(255, 184, 136, 102))
+                glow.setColorAt(1, QColor(255, 184, 136, 0))
+                sun_color = QColor(255, 176, 106, 220)
+            else:
+                glow.setColorAt(0, QColor(255, 239, 170, 112))
+                glow.setColorAt(1, QColor(255, 239, 170, 0))
+                sun_color = QColor(255, 219, 112, 228)
+            p.setBrush(glow)
+            p.setPen(Qt.NoPen)
+            p.drawEllipse(QPointF(body_x, body_y), 44, 44)
+            p.setBrush(sun_color)
+            p.drawEllipse(QPointF(body_x, body_y + 2 * math.sin(self.sun_phase)), 14, 14)
+        else:
+            glow = QRadialGradient(QPointF(body_x, body_y), 34)
+            glow.setColorAt(0, QColor(188, 204, 255, 76))
+            glow.setColorAt(1, QColor(188, 204, 255, 0))
+            p.setBrush(glow)
+            p.setPen(Qt.NoPen)
+            p.drawEllipse(QPointF(body_x, body_y), 34, 34)
+            p.setBrush(QColor(236, 240, 252, 230))
+            p.drawEllipse(QPointF(body_x, body_y), 11, 11)
+        for cloud in self.clouds:
+            alpha = cloud.alpha + (18 if self.weather_mode == "cloudy" else 0) + (10 if self.weather_mode == "rainy" else 0) + (8 if phase == "night" else 0)
+            alpha = max(76, min(168, alpha))
+            cx = cloud.x
+            cy = max(30.0 * cloud.scale, cloud.y)
+            s = cloud.scale
+            p.setPen(Qt.NoPen)
+            p.setBrush(QColor(160, 170, 185, int(alpha * 0.24)))
+            p.drawEllipse(QPointF(cx + 2 * s, cy + 12 * s), 27 * s, 7 * s)
+            p.setBrush(QColor(238, 243, 248, int(alpha * 0.84)))
+            p.drawEllipse(QPointF(cx - 18 * s, cy + 7 * s), 13 * s, 10 * s)
+            p.drawEllipse(QPointF(cx - 6 * s, cy + 1 * s), 16 * s, 14 * s)
+            p.drawEllipse(QPointF(cx + 9 * s, cy), 17 * s, 14 * s)
+            p.drawEllipse(QPointF(cx + 22 * s, cy + 7 * s), 12 * s, 9 * s)
+            p.drawRoundedRect(QRectF(cx - 24 * s, cy + 7 * s, 52 * s, 12 * s), 7 * s, 7 * s)
+        if self.weather_mode == "rainy":
+            p.setPen(QPen(QColor(150, 196, 255, 118), 1.2, Qt.SolidLine, Qt.RoundCap))
+            for drop in self.rain_drops:
+                p.drawLine(QPointF(drop.x, drop.y), QPointF(drop.x - self.wind * 1.6, drop.y + drop.length))
+            p.setPen(Qt.NoPen)
+
+    def _draw_ground_weather(self, p: QPainter) -> None:
+        if not self.weather_enabled:
+            return
+        w = self.width()
+        h = self.height()
+        phase = self._daylight_phase()
+        if phase == "night":
+            _, body_progress = self._celestial_progress()
+            arch = math.sin(max(0.0, min(1.0, body_progress)) * math.pi)
+            moon_y = 26 + (1.0 - arch) * 28
+            zone_top = max(0.0, min(float(h - 24), moon_y - 8.0))
+            zone = QRectF(0, zone_top, w, h - zone_top)
+            top = QColor(84, 104, 150, 26)
+            mid = QColor(30, 42, 78, 72)
+            bottom = QColor(6, 10, 20, 170)
+        elif phase == "dawn":
+            zone = QRectF(0, h - 78, w, 78)
+            top = QColor(112, 138, 146, 24)
+            bottom = QColor(120, 106, 88, 74)
+        elif phase == "dusk":
+            zone = QRectF(0, h - 78, w, 78)
+            top = QColor(104, 98, 132, 26)
+            bottom = QColor(84, 68, 76, 76)
+        else:
+            zone = QRectF(0, h - 78, w, 78)
+            top = QColor(126, 158, 118, 18)
+            bottom = QColor(88, 104, 74, 54)
+        if phase != "night":
+            if self.weather_mode == "rainy":
+                bottom = QColor(76, 92, 112, max(bottom.alpha(), 94))
+            elif self.weather_mode == "sunny":
+                bottom = QColor(max(bottom.red(), 96), max(bottom.green(), 112), max(bottom.blue(), 74), max(bottom.alpha(), 58))
+        grad = QLinearGradient(zone.topLeft(), zone.bottomLeft())
+        grad.setColorAt(0, top)
+        if phase == "night":
+            grad.setColorAt(0.42, mid)
+        grad.setColorAt(1, bottom)
+        p.setBrush(grad)
+        p.setPen(Qt.NoPen)
+        p.drawRect(zone)
+        if not self.puddles:
+            return
+        for puddle in self.puddles:
+            alpha = int(max(0.0, min(1.0, puddle.alpha)) * 255)
+            mud = QColor(108, 84, 62, max(36, int(alpha * 0.50)))
+            water = QColor(118, 162, 208, max(56, int(alpha * 0.78)))
+            shine = QColor(240, 248, 255, max(28, int(alpha * 0.54)))
+            p.setBrush(mud)
+            p.setPen(Qt.NoPen)
+            p.drawEllipse(QPointF(puddle.x, puddle.y + 1), puddle.width, puddle.depth + 1.2)
+            p.setBrush(water)
+            p.drawEllipse(QPointF(puddle.x, puddle.y), puddle.width * 0.88, puddle.depth)
+            p.setPen(QPen(shine, 1.0, Qt.SolidLine, Qt.RoundCap))
+            p.drawLine(QPointF(puddle.x - puddle.width * 0.32, puddle.y - 1), QPointF(puddle.x + puddle.width * 0.08, puddle.y - 2))
+            p.setPen(Qt.NoPen)
+
+    def _draw_mud_trails(self, p: QPainter) -> None:
+        if not self.mud_trails:
+            return
+        for trail in self.mud_trails:
+            alpha = int(max(0.0, min(1.0, trail.alpha)) * 255)
+            p.setBrush(QColor(92, 62, 42, max(26, alpha)))
+            p.setPen(Qt.NoPen)
+            p.drawEllipse(QPointF(trail.x, trail.y), trail.width, max(2.8, trail.width * 0.22))
+            p.setBrush(QColor(48, 36, 28, max(12, int(alpha * 0.34))))
+            p.drawEllipse(QPointF(trail.x - trail.width * 0.22, trail.y - 0.4), trail.width * 0.34, max(1.6, trail.width * 0.10))
+
+    def _draw_mud_cleaner(self, p: QPainter) -> None:
+        p.save()
+        p.translate(self.mud_cleaner_x, self.mud_cleaner_y)
+        bob = math.sin(self.mud_cleaner_phase * 2.1)
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor(20, 22, 26, 80))
+        p.drawEllipse(QPointF(0, 18), 18, 5)
+        p.setBrush(QColor(236, 242, 247, 244))
+        p.setPen(QPen(QColor(120, 132, 142, 230), 1.2))
+        body = QPainterPath()
+        body.addRoundedRect(QRectF(-16, -25 + bob, 32, 28), 6, 6)
+        p.drawPath(body)
+        p.setBrush(QColor(22, 24, 28, 238))
+        p.setPen(QPen(QColor(66, 74, 82, 220), 0.9))
+        p.drawRoundedRect(QRectF(-11, -15 + bob, 22, 9), 3, 3)
+        p.setBrush(QColor(255, 221, 92, 230))
+        p.setPen(Qt.NoPen)
+        p.drawRect(QRectF(-7, -12 + bob, 4, 2))
+        p.drawRect(QRectF(3, -12 + bob, 4, 2))
+        p.setBrush(QColor(255, 110, 96, 230))
+        p.drawRoundedRect(QRectF(-4, -30 + bob, 8, 5), 2, 2)
+        p.setBrush(QColor(84, 94, 102, 230))
+        p.setPen(QPen(QColor(34, 38, 42, 220), 1.0))
+        p.drawRoundedRect(QRectF(-17, 4 + bob, 34, 8), 4, 4)
+        p.setPen(QPen(QColor(184, 206, 214, 210), 1.0))
+        for i in range(5):
+            x = -12 + i * 6
+            p.drawLine(QPointF(x, 5 + bob), QPointF(x + 3, 11 + bob))
+        p.setPen(QPen(QColor(96, 118, 128, 230), 2.0, Qt.SolidLine, Qt.RoundCap))
+        p.drawLine(QPointF(-12, 0 + bob), QPointF(-20, 8 + bob))
+        p.drawLine(QPointF(12, 0 + bob), QPointF(20, 8 + bob))
+        p.restore()
 
 
     def _draw_tv_screen(self, p: QPainter, rect: QRectF) -> None:
@@ -2358,6 +2960,36 @@ class DebrisOverlay(QWidget):
         p.drawLine(QPointF(bx + 9, by + 4), QPointF(bx + 12, by + 22))
         p.drawLine(QPointF(bx + 18, by + 4), QPointF(bx + 20, by + 22))
         p.setPen(Qt.NoPen)
+
+        # Tiny lamp post by the bin. It glows only at night for a cozy taskbar street feel.
+        pole_x = bx - 22
+        pole_top = by - 50
+        p.setPen(QPen(QColor(84, 92, 104, 220), 2.2, Qt.SolidLine, Qt.RoundCap))
+        p.drawLine(QPointF(pole_x, ground_y - 9), QPointF(pole_x, pole_top))
+        p.drawLine(QPointF(pole_x, pole_top), QPointF(pole_x + 10, pole_top))
+        p.setBrush(QColor(58, 62, 72, 230))
+        p.setPen(QPen(QColor(92, 98, 110, 210), 1.0))
+        lamp_rect = QRectF(pole_x + 7, pole_top - 2, 8, 7)
+        p.drawRoundedRect(lamp_rect, 2.2, 2.2)
+        if self._daylight_phase() == "night":
+            glow_center = QPointF(lamp_rect.center().x(), lamp_rect.center().y() + 1)
+            glow = QRadialGradient(glow_center, 34)
+            glow.setColorAt(0, QColor(255, 232, 168, 132))
+            glow.setColorAt(0.45, QColor(255, 222, 146, 44))
+            glow.setColorAt(1, QColor(255, 222, 146, 0))
+            p.setBrush(glow)
+            p.setPen(Qt.NoPen)
+            p.drawEllipse(glow_center, 34, 24)
+            cone = QPainterPath()
+            cone.moveTo(glow_center.x() - 3, glow_center.y() + 3)
+            cone.lineTo(glow_center.x() + 3, glow_center.y() + 3)
+            cone.lineTo(glow_center.x() + 19, ground_y - 9)
+            cone.lineTo(glow_center.x() - 14, ground_y - 9)
+            cone.closeSubpath()
+            p.setBrush(QColor(255, 228, 150, 24))
+            p.drawPath(cone)
+            p.setBrush(QColor(255, 238, 182, 238))
+            p.drawEllipse(glow_center, 2.4, 2.4)
 
 
 class ActivityMonitor:
@@ -2785,11 +3417,12 @@ class PetWindow(QWidget):
         self._place_initially()
         self._update_taskbar_lane()
         self.mini_chat.show()
-        self.debris_overlay.set_enabled(self.cfg.debris_enabled)
+        self.debris_overlay.set_enabled(self.cfg.debris_enabled or self.cfg.weather_enabled)
+        self.debris_overlay.set_weather_enabled(self.cfg.weather_enabled)
         if self.cfg.debris_enabled:
             self.debris_overlay.summon_debris(8)
         self.show()
-        self.raise_()
+        QTimer.singleShot(0, self._sync_window_stack)
         app = QApplication.instance()
         if app is not None:
             app.aboutToQuit.connect(self.shutdown_workers)
@@ -2816,7 +3449,7 @@ class PetWindow(QWidget):
         self.setWindowFlags(flags)
         if was_visible and not initial:
             self.show()
-            self.raise_()
+            QTimer.singleShot(0, self._sync_window_stack)
 
     def _apply_config_changes(self) -> None:
         old_center = self.frameGeometry().center()
@@ -2826,9 +3459,11 @@ class PetWindow(QWidget):
         self.move(old_center.x() - self.width() // 2, old_center.y() - self.height() // 2)
         self._apply_window_flags()
         self.activity_monitor.set_enabled(self.cfg.screen_awareness_enabled)
-        self.debris_overlay.set_enabled(self.cfg.debris_enabled)
+        self.debris_overlay.set_enabled(self.cfg.debris_enabled or self.cfg.weather_enabled)
+        self.debris_overlay.set_weather_enabled(self.cfg.weather_enabled)
         self._update_taskbar_lane()
         self.snap_to_taskbar_lane()
+        QTimer.singleShot(0, self._sync_window_stack)
         self.store.flush()
         self._schedule_next_ai_reaction()
         self._schedule_next_ambient_ai()
@@ -2940,6 +3575,11 @@ class PetWindow(QWidget):
         debris_toggle.toggled.connect(self._set_debris_enabled)
         menu.addAction(debris_toggle)
 
+        weather_toggle = QAction("Weather ambience", self, checkable=True)
+        weather_toggle.setChecked(self.store.config().weather_enabled)
+        weather_toggle.toggled.connect(self._set_weather_enabled)
+        menu.addAction(weather_toggle)
+
         ai_reactions = QAction("Ollama reactions", self, checkable=True)
         ai_reactions.setChecked(self.store.config().ai_reactions_enabled)
         ai_reactions.toggled.connect(self._set_ai_reactions_enabled)
@@ -2990,6 +3630,11 @@ class PetWindow(QWidget):
         if checked:
             self.debris_overlay.summon_debris(8)
         self.show_bubble("Cleanup duty online." if checked else "No more debris for now.", 2800)
+
+    def _set_weather_enabled(self, checked: bool) -> None:
+        self.store.set_value("pet/weather_enabled", checked)
+        self._apply_config_changes()
+        self.show_bubble("Tiny weather online." if checked else "Weather layer disabled.", 2800)
 
     def _set_ai_reactions_enabled(self, checked: bool) -> None:
         self.store.set_value("awareness/ai_reactions_enabled", checked)
@@ -3363,6 +4008,69 @@ class PetWindow(QWidget):
             self._remember_event("tiny_tool_used", text="sounds_on", data={"did": "tool_sounds_on"})
             self._set_tts_enabled(True)
             return True
+        if t in {"weather off", "disable weather", "weather disabled", "climate off", "turn weather off"}:
+            self._remember_event("tiny_tool_used", text="weather_off", data={"did": "tool_weather_off"})
+            self._set_weather_enabled(False)
+            return True
+        if t in {"weather on", "enable weather", "weather enabled", "climate on", "turn weather on"}:
+            self._remember_event("tiny_tool_used", text="weather_on", data={"did": "tool_weather_on"})
+            self._set_weather_enabled(True)
+            return True
+        if any(p in t for p in ["make it rain", "start rain", "rain please", "rainy mode", "make rainy"]):
+            self._remember_event("tiny_tool_used", text="weather_rainy", data={"did": "tool_weather_rainy"})
+            self._set_weather_enabled(True)
+            self.debris_overlay.set_weather_mode("rainy", 120.0)
+            self.show_bubble("Rain mode drifting in.", 7500, source="tool")
+            return True
+        if any(p in t for p in ["make it sunny", "sunny mode", "show sun", "bring sun"]):
+            self._remember_event("tiny_tool_used", text="weather_sunny", data={"did": "tool_weather_sunny"})
+            self._set_weather_enabled(True)
+            self.debris_overlay.set_daylight_override("day")
+            self.debris_overlay.set_weather_mode("sunny", 120.0)
+            self.show_bubble("Sunny mode online.", 7500, source="tool")
+            return True
+        if any(p in t for p in ["make it cloudy", "cloudy mode", "more clouds"]):
+            self._remember_event("tiny_tool_used", text="weather_cloudy", data={"did": "tool_weather_cloudy"})
+            self._set_weather_enabled(True)
+            self.debris_overlay.set_weather_mode("cloudy", 120.0)
+            self.show_bubble("Cloud cover arriving.", 7500, source="tool")
+            return True
+        if any(p in t for p in ["make it windy", "windy mode", "more wind"]):
+            self._remember_event("tiny_tool_used", text="weather_windy", data={"did": "tool_weather_windy"})
+            self._set_weather_enabled(True)
+            self.debris_overlay.set_weather_mode("windy", 120.0)
+            self.show_bubble("Wind picking up.", 7500, source="tool")
+            return True
+        if any(p in t for p in ["make it night", "night mode", "show night", "bring night"]):
+            self._remember_event("tiny_tool_used", text="daylight_night", data={"did": "tool_daylight_night"})
+            self._set_weather_enabled(True)
+            self.debris_overlay.set_daylight_override("night")
+            self.show_bubble("Night mode online.", 7500, source="tool")
+            return True
+        if any(p in t for p in ["make it day", "day mode", "show day", "bring daylight"]):
+            self._remember_event("tiny_tool_used", text="daylight_day", data={"did": "tool_daylight_day"})
+            self._set_weather_enabled(True)
+            self.debris_overlay.set_daylight_override("day")
+            self.show_bubble("Daylight mode online.", 7500, source="tool")
+            return True
+        if any(p in t for p in ["make it dawn", "dawn mode", "sunrise mode"]):
+            self._remember_event("tiny_tool_used", text="daylight_dawn", data={"did": "tool_daylight_dawn"})
+            self._set_weather_enabled(True)
+            self.debris_overlay.set_daylight_override("dawn")
+            self.show_bubble("Dawn mode glowing.", 7500, source="tool")
+            return True
+        if any(p in t for p in ["make it dusk", "dusk mode", "sunset mode"]):
+            self._remember_event("tiny_tool_used", text="daylight_dusk", data={"did": "tool_daylight_dusk"})
+            self._set_weather_enabled(True)
+            self.debris_overlay.set_daylight_override("dusk")
+            self.show_bubble("Dusk mode warming up.", 7500, source="tool")
+            return True
+        if t in {"real time mode", "use real time", "clock mode", "clear time override"}:
+            self._remember_event("tiny_tool_used", text="daylight_realtime", data={"did": "tool_daylight_realtime"})
+            self._set_weather_enabled(True)
+            self.debris_overlay.set_daylight_override("")
+            self.show_bubble("Back to real sky time.", 7500, source="tool")
+            return True
         if any(p in t for p in ["send wind", "summon wind", "send leaves", "send debris", "send trash"]):
             return self._execute_wind_summon_command(raw)
         if re.search(r"\b(clean|clean up|clean this|sweep)\b", t):
@@ -3374,7 +4082,7 @@ class PetWindow(QWidget):
             self.show_bubble("TV break authorized.", 7500, source="tool")
             return True
         if t in {"skills", "show skills", "what can you do", "tiny tools"}:
-            self.show_bubble("Reminders, ball, butterfly, EVA, trash, wind.", 11000, source="tool")
+            self.show_bubble("Reminders, ball, butterfly, EVA, trash, wind, weather.", 11000, source="tool")
             return True
         return False
 
@@ -4761,6 +5469,7 @@ class PetWindow(QWidget):
         self.bubble_timer.setSingleShot(True)
         self.bubble_timer.timeout.connect(self._hide_bubble)
         self.bubble_timer.start(duration_ms)
+        QTimer.singleShot(0, self._sync_window_stack)
         self.update()
 
     def _hide_bubble(self) -> None:
@@ -5185,6 +5894,7 @@ class PetWindow(QWidget):
             if self._maybe_ball_cross_encounter():
                 self.update()
                 return
+        self._maybe_weather_play(now)
         if self.cfg.debris_enabled and self.tick % 3 == 0:
             # Pickup should feel physical: while moving across the taskbar, the treads
             # can catch debris in the way. Only the explicit clean action may redirect
@@ -5196,10 +5906,111 @@ class PetWindow(QWidget):
                 self._clear_debris_under_pet(extra_radius=42, incidental=True)
         if self.tick % 30 == 0:
             self._update_taskbar_lane()
+        self.update()
+
+    def _sync_window_stack(self) -> None:
+        try:
+            if self.debris_overlay.isVisible():
+                self.debris_overlay.lower()
+        except RuntimeError:
+            pass
+        try:
             self.raise_()
+        except RuntimeError:
+            pass
+        try:
             if self.bubble.isVisible():
                 self.bubble.raise_()
-        self.update()
+        except RuntimeError:
+            pass
+
+    def _maybe_weather_play(self, now: float) -> None:
+        if not getattr(self.cfg, "weather_enabled", False):
+            return
+        weather = self.debris_overlay.weather_status() if hasattr(self.debris_overlay, "weather_status") else {}
+        if not weather or not weather.get("enabled"):
+            return
+        mode = str(weather.get("mode", "sunny"))
+        daylight = str(weather.get("daylight", "day"))
+        celestial = weather.get("celestial", {}) if isinstance(weather.get("celestial"), dict) else {}
+        puddle_point = self.debris_overlay.nearest_puddle_global_to(self.frameGeometry().center().x(), self.frameGeometry().bottom())
+        puddle_count = int(weather.get("puddle_count", 0) or 0)
+        cloud_count = int(weather.get("cloud_count", 0) or 0)
+        cleaner = weather.get("mud_cleaner", {}) if isinstance(weather.get("mud_cleaner"), dict) else {}
+        signature = f"{mode}:{daylight}:{celestial.get('kind', 'sun')}"
+        if signature != str(getattr(self, "_last_weather_signature", "")):
+            self._last_weather_signature = signature
+            self._last_weather_signature_at = now
+            if not self.bubble_text and now - float(getattr(self, "_last_weather_comment_at", 0.0)) > 10:
+                if mode == "rainy":
+                    self.show_bubble(random.choice(["Rainy patrol mode.", "Tiny rain report!", "Puddle season activated."]), 7000, source="static")
+                elif celestial.get("kind") == "moon":
+                    self.show_bubble(random.choice(["Moon watch duty.", "Night sky detected.", "Tiny moon patrol."]), 7000, source="static")
+                elif daylight == "dawn":
+                    self.show_bubble(random.choice(["Morning glow online.", "Sunrise check-in.", "Tiny dawn stretch."]), 7000, source="static")
+                self._last_weather_comment_at = now
+        if puddle_point and self.current_action in {"move_to", "roam", "chill", "pause", "watch", "watch_tv"}:
+            near_puddle = abs(self.frameGeometry().center().x() - puddle_point.x()) < 34 and abs(self.frameGeometry().bottom() - puddle_point.y()) < 26
+            if near_puddle and now - float(getattr(self, "_last_puddle_play_at", 0.0)) > 12:
+                self._last_puddle_play_at = now
+                self.emoji_effect = "💧"
+                self.emoji_until = now + 5.5
+                self._nudge_mood(playful=4.5, curious=2.2, bored=-2.0)
+                if not self.bubble_text:
+                    self.show_bubble(random.choice(["splish!", "Puddle boop.", "Tiny splash detected!"]), 6500, source="static")
+        if mode == "rainy" and puddle_point and self.target_point is None and self.current_action in {"chill", "pause", "watch"}:
+            if now - float(getattr(self, "_last_weather_wander_at", 0.0)) > 28 and random.random() < 0.10:
+                self._last_weather_wander_at = now
+                self.current_action = "move_to"
+                self.target_point = self._clamp_to_lane(QPoint(puddle_point.x(), puddle_point.y() - self.height() // 2))
+                self.eye_focus = "down"
+                self.eyebrow_pose = "curious"
+        cleaner_xy = cleaner.get("global_xy") if cleaner.get("visible") else None
+        if isinstance(cleaner_xy, list) and len(cleaner_xy) >= 2:
+            center = self.frameGeometry().center()
+            cleaner_state = str(cleaner.get("state", ""))
+            cleaner_distance = abs(float(cleaner_xy[0]) - center.x())
+            cleaner_eventful = cleaner_distance < 150 or cleaner_state in {"enter", "clean"}
+            if cleaner_eventful and now - float(getattr(self, "_last_mud_cleaner_annoy_at", 0.0)) > 9:
+                self._last_mud_cleaner_annoy_at = now
+                self._nudge_mood(irritated=4.5, playful=3.0, curious=2.0, bored=-2.0)
+                self.set_expression("thinking")
+                self._apply_body_controls({"eyes": "down", "eyebrow": "annoyed", "left_arm": "point"})
+                self._remember_event("mud_cleaner_rivalry", text="rain cleaner scrubbing Wally's mud trail", data={
+                    "did": "tiny_mud_cleaner_scrubbed_trail",
+                    "weather": weather,
+                    "inspiration": "fussy cleaner bot follows and cleans the messy rover trail; use the dynamic only, do not quote movie dialogue",
+                })
+                if self.cfg.ai_reactions_enabled and not self._thread_running(self.reaction_worker):
+                    self._pending_activity_note = {
+                        "kind": "mud_cleaner_rivalry",
+                        "scene": "During rain, Wally's treads leave cute mud trails. A tiny fussy cleaner robot rolls in from off-screen and scrubs them away, which annoys Wally in a playful rivalry.",
+                        "weather": weather,
+                        "cleaner_state": cleaner_state,
+                        "distance_px": round(cleaner_distance, 1),
+                        "tone_choices": ["funny", "mock-dramatic", "fussy", "playfully offended", "cute rivalry"],
+                        "hint": "Give Wally one short original comeback about the cleaner erasing his mud art. Do not quote or imitate exact movie lines.",
+                    }
+                    self.request_ai_reaction("mud_cleaner_rivalry_react", use_vision=False)
+                elif not self.bubble_text:
+                    self.show_bubble(random.choice(["Hey! I was using that mud.", "Tiny mop rival detected.", "Stop polishing my puddle art."]), 6500, source="static")
+        ball_status = self.debris_overlay.ball_status() if hasattr(self.debris_overlay, "ball_status") else {}
+        if bool(ball_status.get("over_puddle")) and now - float(getattr(self, "_last_ball_puddle_comment_at", 0.0)) > 10:
+            self._last_ball_puddle_comment_at = now
+            self._nudge_mood(excited=3.0, playful=3.5, proud=1.0)
+            if not self.bubble_text:
+                self.show_bubble(random.choice(["Ball made a splash!", "Puddle crossover!", "Wet basketball drama."]), 6800, source="static")
+        if not self.bubble_text and now - float(getattr(self, "_last_weather_comment_at", 0.0)) > 42 and self.current_action in {"watch", "watch_tv", "chill", "pause"}:
+            line = ""
+            if celestial.get("kind") == "moon":
+                line = random.choice(["Moon is cruising.", "Night sky looks cozy.", "Moon shift looks serious."])
+            elif daylight == "day" and float(celestial.get("progress", 0.0) or 0.0) > 0.42 and float(celestial.get("progress", 0.0) or 0.0) < 0.58:
+                line = random.choice(["Sun is high. Busy-human o'clock.", "Noon vibes detected.", "Sun parked near the middle."])
+            elif mode == "cloudy" and cloud_count >= 3:
+                line = random.choice(["Cloud convoy overhead.", "Sky fluff patrol.", "Clouds are gossiping again."])
+            if line:
+                self._last_weather_comment_at = now
+                self.show_bubble(line, 7200, source="static")
 
     def _clamp_mood(self, value: float) -> float:
         return max(0.0, min(100.0, float(value)))
@@ -6015,6 +6826,9 @@ class PetWindow(QWidget):
         new_x = int(pos.x() + dx / distance * step)
         new_y = int(pos.y() + dy / distance * step)
         self.move(new_x, new_y)
+        if self.cfg.weather_enabled and hasattr(self.debris_overlay, "add_mud_trail_global") and self.current_action not in {"chase_eva", "fall", "parachute"}:
+            frame = self.frameGeometry()
+            self.debris_overlay.add_mud_trail_global(frame.center().x(), frame.bottom())
         if abs(dx) > 1:
             self._facing_left = dx < 0
         # Watchdog: if a target exists but we are barely moving, refresh the target soon.
@@ -6608,6 +7422,7 @@ class PetWindow(QWidget):
                 "eva": self.debris_overlay.eva_status() if hasattr(self.debris_overlay, "eva_status") else {"visible": False},
                 "eva_recovery_seconds_left": round(max(0.0, getattr(self, "_eva_recovery_until", 0.0) - time.time()), 1),
                 "basketball": self.debris_overlay.ball_status(),
+                "weather": self.debris_overlay.weather_status() if hasattr(self.debris_overlay, "weather_status") else {"enabled": False},
                 "tv_mode": getattr(self.debris_overlay, "tv_mode", "static"),
                 "tv_break": {
                     "active": bool(time.time() < getattr(self, "_tv_break_until", 0)),
