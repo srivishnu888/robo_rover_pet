@@ -396,6 +396,30 @@ class SettingsStore:
         )
 
 class SettingsDialog(QDialog):
+    @staticmethod
+    def _available_ollama_models() -> List[str]:
+        try:
+            result = subprocess.run(
+                ["ollama", "list"],
+                capture_output=True,
+                text=True,
+                timeout=2.5,
+                check=False,
+            )
+        except Exception:
+            return []
+        if result.returncode != 0:
+            return []
+        models: List[str] = []
+        for line in result.stdout.splitlines():
+            line = line.strip()
+            if not line or line.lower().startswith("name "):
+                continue
+            name = line.split()[0].strip()
+            if name and name not in models:
+                models.append(name)
+        return models
+
     def __init__(self, store: SettingsStore, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
         self.store = store
@@ -412,7 +436,8 @@ class SettingsDialog(QDialog):
 
         self.model_combo = QComboBox()
         self.model_combo.setEditable(True)
-        self.model_combo.addItems([
+        detected_models = self._available_ollama_models()
+        fallback_models = [
             "ministral-3:3b",
             "qwen3-vl:2b",
             "qwen2.5:1.5b-instruct",
@@ -420,8 +445,17 @@ class SettingsDialog(QDialog):
             "gemma2:2b",
             "phi3:mini",
             "llama3.2:3b",
-        ])
+        ]
+        model_items: List[str] = []
+        for model_name in [cfg.model, *detected_models, *fallback_models]:
+            if model_name and model_name not in model_items:
+                model_items.append(model_name)
+        self.model_combo.addItems(model_items)
         self.model_combo.setCurrentText(cfg.model)
+        self.model_combo.setToolTip(
+            "Detected local Ollama models are listed first when `ollama list` is available. "
+            "You can still type any model tag manually."
+        )
 
         self.base_url_edit = QLineEdit(cfg.base_url)
 
@@ -457,8 +491,12 @@ class SettingsDialog(QDialog):
         self.awareness_checkbox = QCheckBox("React to mouse movement, typing, and scrolling")
         self.awareness_checkbox.setChecked(cfg.screen_awareness_enabled)
 
-        self.screenshot_checkbox = QCheckBox("Let local Ollama vision glance at screenshots for reactions")
+        self.screenshot_checkbox = QCheckBox("Send screenshots to Ollama vision model for screen reactions")
         self.screenshot_checkbox.setChecked(cfg.screenshot_reactions_enabled)
+        self.screenshot_checkbox.setToolTip(
+            "Turn this OFF when using text-only models. Leave it ON only for vision-capable models "
+            "such as qwen3-vl or other VL/vision tags."
+        )
 
         self.scale_spin = QSpinBox()
         self.scale_spin.setRange(25, 100)
@@ -518,7 +556,8 @@ class SettingsDialog(QDialog):
 
         form = QFormLayout()
         form.addRow("Local Ollama", self.api_key_edit)
-        form.addRow("Model", self.model_combo)
+        model_label = f"Model ({len(detected_models)} local)" if detected_models else "Model"
+        form.addRow(model_label, self.model_combo)
         form.addRow("Base URL", self.base_url_edit)
         form.addRow("Max answer tokens", self.max_tokens_spin)
         form.addRow("Pet size", self.scale_spin)
